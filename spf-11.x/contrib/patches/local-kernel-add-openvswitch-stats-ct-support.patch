@@ -1,0 +1,121 @@
+--- a/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.c
++++ b/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.c
+@@ -2636,6 +2636,105 @@ struct sw_flow *ovs_accel_flow_find_by_r
+ }
+ EXPORT_SYMBOL(ovs_accel_flow_find_by_recirc);
+ 
++static int ipv6_addr_masked_cmp(struct in6_addr *addr1, struct in6_addr *addr2, struct in6_addr *mask)
++{
++	int i;
++	for (i = 0; i < 16; i++) {
++		if (addr1->in6_u.u6_addr8[i] != (addr2->in6_u.u6_addr8[i] & mask->in6_u.u6_addr8[i])) {
++			return 1;
++		}
++	}
++	return 0;
++}
++
++/* Find datapath flow by matching using only fields ECM is actually aware of.
++ * Must be called under rcu_read_lock()
++ */
++static struct sw_flow *ovs_accel_flow_find_no_ct(struct datapath *dp, struct sw_flow_key *key)
++{
++	struct table_instance *ti;
++	struct sw_flow *flow = NULL;
++	struct sw_flow_key *flow_key;
++	struct sw_flow_key *flow_mask;
++	struct sw_flow_actions *sf_acts;
++	const struct nlattr *a;
++	int rem;
++	int i;
++
++	ti = rcu_dereference(dp->table.ti);
++
++	for (i = 0; i < ti->n_buckets; i++) {
++		struct hlist_head *head = flex_array_get(ti->buckets, i);
++		struct hlist_node *n;
++
++		if (unlikely(!head))
++			continue;
++
++		hlist_for_each_entry_safe(flow, n, head, flow_table.node[ti->node_ver]) {
++			int output_count = 0;
++			flow_key = &flow->key;
++			flow_mask = &flow->mask->key;
++
++			/* L2 */
++			if ((flow_key->eth.type != key->eth.type) ||
++			     !ether_addr_equal(flow_key->eth.src, key->eth.src) ||
++			     !ether_addr_equal(flow_key->eth.dst, key->eth.dst))
++			{
++				continue;
++			}
++			/* VLAN */
++			if (flow_key->eth.tci != key->eth.tci) {
++				printk("VLAN does not match\n");
++				continue;
++			}
++
++			/* L3 */
++			if (key->eth.type == htons(ETH_P_IP)) {
++				if (flow_key->ipv4.addr.src != (key->ipv4.addr.src & flow_mask->ipv4.addr.src) ||
++					flow_key->ipv4.addr.dst != (key->ipv4.addr.dst & flow_mask->ipv4.addr.dst))
++				{
++					continue;
++				}
++			} else if (key->eth.type == htons(ETH_P_IPV6)) {
++				if (ipv6_addr_masked_cmp(&flow_key->ipv6.addr.src, &key->ipv6.addr.src, &flow_mask->ipv6.addr.src) != 0 ||
++					ipv6_addr_masked_cmp(&flow_key->ipv6.addr.dst, &key->ipv6.addr.dst, &flow_mask->ipv6.addr.dst) != 0)
++				{
++					continue;
++				}
++			} else {
++				continue;
++			}
++
++			/* L4 */
++			if (flow_key->tp.src != (key->tp.src & flow_mask->tp.src) ||
++				flow_key->tp.dst != (key->tp.dst & flow_mask->tp.dst) ||
++				flow_key->ip.proto != (key->ip.proto & flow_mask->ip.proto))
++			{
++				continue;
++			}
++
++			/* Count output actions */
++			sf_acts = rcu_dereference(flow->sf_acts);
++			for (a = sf_acts->actions, rem = sf_acts->actions_len; rem > 0;
++					a = nla_next(a, &rem)) {
++				if (nla_type(a) == OVS_ACTION_ATTR_OUTPUT) {
++					output_count++;
++				}
++			}
++
++			/* Only allow flows with output_count == 1 */
++			if (output_count != 1) {
++				continue;
++			}
++
++			return flow;
++		}
++	}
++
++	return NULL;
++}
++EXPORT_SYMBOL(ovs_accel_flow_find_no_ct);
++
+ /* Update flow rule statistics */
+ int ovs_accel_flow_stats_update(void *dp_inst, void *out_vport,
+ 				 struct sw_flow_key *key, int pkts, int bytes)
+@@ -2649,6 +2748,12 @@ int ovs_accel_flow_stats_update(void *dp
+ 	u32 n_mask_hit;
+ 
+ 	rcu_read_lock();
++
++	flow = ovs_accel_flow_find_no_ct(dp, key);
++	if (flow) {
++		key = &flow->key;
++	}
++
+ 	flow = ovs_flow_tbl_lookup_stats(&dp->table, key, &n_mask_hit);
+ 	if (!flow) {
+ 		rcu_read_unlock();

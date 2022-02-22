@@ -1,0 +1,106 @@
+--- a/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.c
++++ b/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.c
+@@ -325,11 +325,33 @@ static void ovs_dp_flow_add_notify(struc
+ static void ovs_dp_flow_del_notify(struct datapath *dp, struct sw_flow *sf)
+ {
+ 	struct ovs_accel_callback *ovs_cb;
++	struct sw_flow_actions *acts;
++	const struct nlattr *a;
++	int output_count = 0;
++	int rem;
+ 
+ 	rcu_read_lock();
++
++	acts = rcu_dereference(sf->sf_acts);
++	for (a = acts->actions, rem = acts->actions_len; rem > 0;
++	     a = nla_next(a, &rem)) {
++		if (nla_type(a) == OVS_ACTION_ATTR_OUTPUT) {
++			output_count++;
++		}
++	}
++
++	/* If the flow does not have exactly 1 output action, we can ignore it.
++	 * This works because only flows with exactly 1 output action can be
++	 * accelerated in the first place.
++	 */
++	if (output_count != 1) {
++		goto out;
++	}
++
+ 	ovs_cb = rcu_dereference(ovs_accel_cb);
+ 	if (ovs_cb && ovs_cb->ovs_accel_dp_flow_del)
+ 		ovs_cb->ovs_accel_dp_flow_del((void *)dp, sf);
++out:
+ 	rcu_read_unlock();
+ }
+ 
+@@ -2561,6 +2583,59 @@ check_outdev:
+ }
+ EXPORT_SYMBOL(ovs_accel_flow_find_by_mac);
+ 
++/* Find datapath flow rule using recirculation id */
++struct sw_flow *ovs_accel_flow_find_by_recirc(void *dp_inst, u32 recirc_id)
++{
++	struct datapath *dp = dp_inst;
++	struct table_instance *ti;
++	struct sw_flow *flow = NULL;
++	struct sw_flow_actions *sf_acts;
++	const struct nlattr *a;
++	int rem;
++	int i;
++
++	rcu_read_lock();
++	ti = rcu_dereference(dp->table.ti);
++
++	for (i = 0; i < ti->n_buckets; i++) {
++		struct hlist_head *head = flex_array_get(ti->buckets, i);
++		struct hlist_node *n;
++
++		if (unlikely(!head))
++			continue;
++
++		hlist_for_each_entry_safe(flow, n, head, flow_table.node[ti->node_ver]) {
++			int output_count = 0;
++
++			/* Only look for flows with specific recirc_id */
++			if (flow->key.recirc_id != recirc_id) {
++				continue;
++			}
++
++			/* Count output actions */
++			sf_acts = rcu_dereference(flow->sf_acts);
++			for (a = sf_acts->actions, rem = sf_acts->actions_len; rem > 0;
++					a = nla_next(a, &rem)) {
++				if (nla_type(a) == OVS_ACTION_ATTR_OUTPUT) {
++					output_count++;
++				}
++			}
++
++			/* Only allow flows with output_count == 1 */
++			if (output_count != 1) {
++				continue;
++			}
++
++			rcu_read_unlock();
++			return flow;
++		}
++	}
++
++	rcu_read_unlock();
++	return NULL;
++}
++EXPORT_SYMBOL(ovs_accel_flow_find_by_recirc);
++
+ /* Update flow rule statistics */
+ int ovs_accel_flow_stats_update(void *dp_inst, void *out_vport,
+ 				 struct sw_flow_key *key, int pkts, int bytes)
+--- a/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.h
++++ b/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.h
+@@ -240,6 +240,7 @@ void ovs_unregister_accelerator(struct o
+ int ovs_accel_flow_stats_update(void *dp, void *out_vport,
+ 				struct sw_flow_key *sf, int pkts, int bytes);
+ struct sw_flow *ovs_accel_flow_find(void *dp, struct sw_flow_key *sfk);
++struct sw_flow *ovs_accel_flow_find_by_recirc(void *dp_inst, u32 recirc_id);
+ struct net_device *ovs_accel_dev_find(void *dp, int vport_no);
+ struct net_device *ovs_accel_egress_dev_find(void *dp_inst,
+ 					     struct sw_flow_key *key,

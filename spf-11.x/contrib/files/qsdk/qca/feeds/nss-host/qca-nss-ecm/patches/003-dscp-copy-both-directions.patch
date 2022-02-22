@@ -1,0 +1,22 @@
+Copy any DSCP remarking found in one direction to the other direction.
+
+--- a/ecm_classifier_ovs.c
++++ b/ecm_classifier_ovs.c
+@@ -784,6 +784,7 @@ static void ecm_classifier_ovs_process_r
+ 			 */
+ 			spin_lock_bh(&ecm_classifier_ovs_lock);
+ 			ecvi->process_response.flow_dscp = resp.dscp >> XT_DSCP_SHIFT;
++			ecvi->process_response.return_dscp = resp.dscp >> XT_DSCP_SHIFT;
+ 			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_DSCP;
+ 			spin_unlock_bh(&ecm_classifier_ovs_lock);
+ 			DEBUG_TRACE("FLOW DSCP : 0x%x\n", ecvi->process_response.flow_dscp);
+@@ -904,6 +905,9 @@ static void ecm_classifier_ovs_process_r
+ 			 * because this is the to_dev and the direction of the flow is reply direction.
+ 			 */
+ 			spin_lock_bh(&ecm_classifier_ovs_lock);
++			if (!(ecvi->process_response.process_actions & ECM_CLASSIFIER_PROCESS_ACTION_DSCP)) {
++				ecvi->process_response.flow_dscp = resp.dscp >> XT_DSCP_SHIFT;
++			}
+ 			ecvi->process_response.return_dscp = resp.dscp >> XT_DSCP_SHIFT;
+ 			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_DSCP;
+ 			spin_unlock_bh(&ecm_classifier_ovs_lock);

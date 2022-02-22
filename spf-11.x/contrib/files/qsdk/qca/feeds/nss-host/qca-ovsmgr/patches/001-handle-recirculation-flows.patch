@@ -1,0 +1,31 @@
+--- a/ovsmgr_dp.c
++++ b/ovsmgr_dp.c
+@@ -1699,6 +1699,7 @@ enum ovsmgr_flow_status ovsmgr_dp_flow_i
+ 					key.eth.src, key.eth.type, ofi);
+ 	}
+ 
++retry:
+ 	/*
+ 	 * Flow is found, find if VLAN operations are needed and check
+ 	 * if egress port is allowed.
+@@ -1774,6 +1775,20 @@ enum ovsmgr_flow_status ovsmgr_dp_flow_i
+ 			ovsmgr_info("%px: DSCP = %x\n", sf, ofi->dscp);
+ 			break;
+ 		}
++		case OVS_ACTION_ATTR_RECIRC: {
++			struct sw_flow *recirc_flow;
++			u32 recirc_id = nla_get_u32(a);
++			// printk(KERN_INFO "OVS_ACTION_ATTR_RECIRC action detected, making ovs_accel_flow_find_by_recirc call\n");
++			recirc_flow = ovs_accel_flow_find_by_recirc(nod->dp, recirc_id);
++			if (recirc_flow) {
++				/* Prepare for retry */
++				rcu_read_unlock();
++				prev_action = OVS_ACTION_ATTR_UNSPEC;
++				sf = recirc_flow;
++				goto retry;
++			}
++			break;
++		}
+ 		}
+ 
+ 		/*
