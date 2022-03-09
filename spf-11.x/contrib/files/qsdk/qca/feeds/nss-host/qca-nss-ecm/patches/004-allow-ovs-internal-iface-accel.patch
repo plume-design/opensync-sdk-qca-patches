@@ -1,0 +1,33 @@
+This patch allows traffic flowing through any OVS internal interface to be
+accelerated.
+--- a/ecm_classifier_ovs.c
++++ b/ecm_classifier_ovs.c
+@@ -229,7 +229,7 @@ static inline struct net_device *ecm_cla
+ 			}
+ 
+ 		} else {
+-			if (ovsmgr_is_ovs_master(dev)) {
++			if (ovsmgr_is_ovs_internal(dev)) {
+ 				ecm_db_connection_interfaces_deref(interfaces, if_first);
+ 				DEBUG_TRACE("%px: %s_dev: %s at %d index is an OVS bridge dev\n", ci, ecm_db_obj_dir_strings[dir], dev->name, i);
+ 				return dev;
+--- a/ecm_interface.c
++++ b/ecm_interface.c
+@@ -3071,7 +3071,7 @@ struct ecm_db_iface_instance *ecm_interf
+ 		 * OVS BRIDGE?
+ 		 */
+ #ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
+-		if (ovsmgr_is_ovs_master(dev)) {
++		if (ovsmgr_is_ovs_internal(dev)) {
+ 			/*
+ 			 * OVS Bridge
+ 			 */
+@@ -5083,7 +5083,7 @@ int32_t ecm_interface_heirarchy_construc
+ 				}
+ 
+ #ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
+-				if (ovsmgr_is_ovs_master(dest_dev)) {
++				if (ovsmgr_is_ovs_internal(dest_dev)) {
+ 					ip_addr_t look_up_addr;
+ 					uint8_t mac_addr[ETH_ALEN];
+ 					struct net_device *tmp_dev;

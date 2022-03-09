@@ -1,0 +1,29 @@
+In some cases netdevs were not put back.
+This patch addresses these executions paths.
+
+===================================================================
+--- a/frontends/ecm_front_end_ipv4.c
++++ b/frontends/ecm_front_end_ipv4.c
+@@ -206,6 +206,9 @@ bool ecm_front_end_ipv4_interface_constr
+ 			 * then return failure.
+ 			 */
+ 			if (!xfrm_dst_dev) {
++				if (rt_iif_dev) {
++					dev_put(rt_iif_dev);
++				}
+ 				return false;
+ 			}
+ 
+===================================================================
+--- a/frontends/ecm_front_end_ipv6.c
++++ b/frontends/ecm_front_end_ipv6.c
+@@ -181,6 +181,9 @@ bool ecm_front_end_ipv6_interface_constr
+ 			 * then return failure.
+ 			 */
+ 			if (!xfrm_dst_dev) {
++				if (rt_iif_dev) {
++					dev_put(rt_iif_dev);
++				}
+ 				return false;
+ 			}
+ 

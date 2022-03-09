@@ -1,0 +1,69 @@
+In some cases netdevs were not put back.
+This patch addresses these executions paths.
+
+===================================================================
+--- a/netlink/nss_nldtls.c
++++ b/netlink/nss_nldtls.c
+@@ -613,6 +613,7 @@ static int nss_nldtls_create_ipv4_rule_e
+ 
+ 	memcpy(&ipv4.src_mac[0], &nl_rule->msg.create.gmac_ifmac[0], sizeof(ipv4.src_mac));
+ 
++	dev_put(ndev);
+ 	/*
+ 	 * Create an ipv4 rule entry
+ 	 */
+@@ -663,6 +664,7 @@ static int nss_nldtls_create_ipv6_rule_e
+ 
+ 	memcpy(&ipv6.src_mac[0], &nl_rule->msg.create.gmac_ifmac[0], sizeof(ipv6.src_mac));
+ 
++	dev_put(ndev);
+ 	/*
+ 	 * Create an ipv6 rule entry
+ 	 */
+@@ -871,6 +873,7 @@ static int nss_nldtls_ops_update_config(
+ 	key_len = nl_rule->msg.update_config.config_update.crypto.cipher_key.len;
+ 	if (key_len > NSS_NLDTLS_CIPHER_KEY_MAX) {
+ 		nss_nl_error("Invalid cipher length: %u\n", key_len);
++		dev_put(dev);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -878,6 +881,7 @@ static int nss_nldtls_ops_update_config(
+ 	key_len = nl_rule->msg.update_config.config_update.crypto.auth_key.len;
+ 	if (key_len > NSS_NLDTLS_AUTH_KEY_MAX) {
+ 		nss_nl_error("Invalid authentication length: %u\n", key_len);
++		dev_put(dev);
+ 		return -EINVAL;
+ 	}
+ 
+@@ -885,6 +889,7 @@ static int nss_nldtls_ops_update_config(
+ 	key_len = nl_rule->msg.update_config.config_update.crypto.nonce.len;
+ 	if (key_len > NSS_NLDTLS_NONCE_SIZE_MAX) {
+ 		nss_nl_error("Invalid nonce length: %u\n", key_len);
++		dev_put(dev);
+ 		return -EINVAL;
+ 	}
+ 
+===================================================================
+--- a/netlink/nss_nlipsec.c
++++ b/netlink/nss_nlipsec.c
+@@ -508,6 +508,8 @@ static struct nss_nlipsec_rule *nss_nlip
+ 		dev_put(*dev);
+ 		return NULL;
+ 	}
++
++	dev_put(*dev);
+ 	return nl_rule;
+ }
+ 
+===================================================================
+--- a/netlink/nss_nludp_st.c
++++ b/netlink/nss_nludp_st.c
+@@ -981,6 +981,7 @@ static int nss_nludp_st_create_ipv6_rule
+ 	status = nss_ipv6_tx(nss_ctx, &nim);
+ 	if (status != NSS_TX_SUCCESS) {
+ 		nss_nl_info("%px: Create IPv6 message failed %d\n", nss_ctx, status);
++		dev_put(net_dev);
+ 		return -EPERM;
+ 	}
+ 

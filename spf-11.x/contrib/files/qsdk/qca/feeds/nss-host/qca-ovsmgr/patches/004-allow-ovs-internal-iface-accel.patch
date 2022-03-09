@@ -1,0 +1,81 @@
+This patch allows traffic flowing through any OVS internal interface to be
+accelerated.
+--- a/ovsmgr_dp.c
++++ b/ovsmgr_dp.c
+@@ -1890,6 +1890,38 @@ bool ovsmgr_dp_dev_is_master(struct net_
+ }
+ 
+ /*
++ * ovsmgr_dp_dev_is_internal()
++ *	Return true if dev is OVS internal interface
++ */
++bool ovsmgr_dp_dev_is_internal(struct net_device *dev)
++{
++	struct ovsmgr_dp *nod;
++	struct ovsmgr_dp_port *nodp;
++	bool is_internal = false;
++
++	read_lock_bh(&ovsmgr_ctx.lock);
++	nod = ovsmgr_dp_find_by_dev(dev);
++	if (!nod) {
++		read_unlock_bh(&ovsmgr_ctx.lock);
++		ovsmgr_warn("Couldn't find datapath instance, dev = %s\n", dev->name);
++		return false;
++	}
++
++	nodp = ovsmgr_dp_port_find_by_dev(nod, dev);
++	if (!nodp) {
++		read_unlock_bh(&ovsmgr_ctx.lock);
++		ovsmgr_warn("%px: input datapath port instance is not found for dev = %s\n",
++				nod, dev->name);
++		return false;
++	}
++
++	is_internal = nodp->vport_type == OVS_VPORT_TYPE_INTERNAL;
++
++	read_unlock_bh(&ovsmgr_ctx.lock);
++	return is_internal;
++}
++
++/*
+  * ovsmgr_dp_bridge_interface_stats_update()
+  *	Update OVS datapath bridge interface statistics.
+  */
+--- a/ovsmgr_priv.h
++++ b/ovsmgr_priv.h
+@@ -157,6 +157,7 @@ struct net_device *ovsmgr_dp_port_dev_fi
+ 							struct ovsmgr_dp_flow *flow);
+ struct net_device *ovsmgr_dp_dev_get_master(struct net_device *dev);
+ bool ovsmgr_dp_dev_is_master(struct net_device *dev);
++bool ovsmgr_dp_dev_is_internal(struct net_device *dev);
+ enum ovsmgr_flow_status ovsmgr_dp_flow_info_get(struct ovsmgr_dp_flow *flow,
+ 						     struct sk_buff *skb, struct ovsmgr_flow_info *ofi);
+ 
+--- a/ovsmgr.c
++++ b/ovsmgr.c
+@@ -162,6 +162,16 @@ bool ovsmgr_is_ovs_master(struct net_dev
+ EXPORT_SYMBOL(ovsmgr_is_ovs_master);
+ 
+ /*
++ * ovsmgr_is_ovs_internal()
++ *	Return true if dev is OVS internal interface
++ */
++bool ovsmgr_is_ovs_internal(struct net_device *dev)
++{
++	return ovsmgr_dp_dev_is_internal(dev);
++}
++EXPORT_SYMBOL(ovsmgr_is_ovs_internal);
++
++/*
+  * ovsmgr_port_find()
+  *	Find datapath egress port for the given skb, bridge dev and flow
+  */
+--- a/exports/ovsmgr.h
++++ b/exports/ovsmgr.h
+@@ -194,5 +194,6 @@ enum ovsmgr_flow_status ovsmgr_flow_info
+ 					      struct sk_buff *skb, struct ovsmgr_flow_info *ofi);
+ struct net_device *ovsmgr_dev_get_master(struct net_device *dev);
+ bool ovsmgr_is_ovs_master(struct net_device *dev);
++bool ovsmgr_is_ovs_internal(struct net_device *dev);
+ 
+ #endif /* __OVSMGR__H */
