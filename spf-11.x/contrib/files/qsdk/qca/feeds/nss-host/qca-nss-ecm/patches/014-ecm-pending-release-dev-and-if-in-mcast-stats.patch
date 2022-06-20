@@ -1,0 +1,15 @@
+--- a/ecm_classifier_ovs.c
++++ b/ecm_classifier_ovs.c
+@@ -1545,9 +1545,11 @@ static void ecm_classifier_ovs_multicast
+ 	 */
+ 	from_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_FROM, true);
+ 	if_cnt = ecm_interface_multicast_ovs_to_interface_get_and_ref(ci, to_ovs_port, to_ovs_brdev);
++	valid_ifcnt = if_cnt;
++
+ 	if (!from_dev && !if_cnt) {
+ 		DEBUG_WARN("%px: None of the from/to interfaces is OVS bridge port\n", ci);
+-		return;
++		goto done;
+ 	}
+ 
+ 	memset(&flow, 0, sizeof(flow));
