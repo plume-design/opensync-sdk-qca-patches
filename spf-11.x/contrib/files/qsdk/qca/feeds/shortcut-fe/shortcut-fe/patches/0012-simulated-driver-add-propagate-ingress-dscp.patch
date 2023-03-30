@@ -1,0 +1,34 @@
+--- a/simulated-driver/sfe_drv.c
++++ b/simulated-driver/sfe_drv.c
+@@ -613,6 +613,9 @@ sfe_tx_status_t sfe_drv_create_ipv4_rule
+ 		sic.flags |= SFE_CREATE_FLAG_REMARK_DSCP;
+ 	}
+ 
++	sic.ingress_src_dscp = msg->msg.rule_create.dscp_rule.ingress_flow_dscp;
++	sic.ingress_dest_dscp = msg->msg.rule_create.dscp_rule.ingress_return_dscp;
++
+ #ifdef CONFIG_XFRM
+ 	if (msg->msg.rule_create.valid_flags & SFE_RULE_CREATE_DIRECTION_VALID) {
+ 		sic.original_accel = msg->msg.rule_create.direction_rule.flow_accel;
+@@ -1018,6 +1021,9 @@ sfe_tx_status_t sfe_drv_create_ipv6_rule
+ 		sic.flags |= SFE_CREATE_FLAG_REMARK_DSCP;
+ 	}
+ 
++	sic.ingress_src_dscp = msg->msg.rule_create.dscp_rule.ingress_flow_dscp;
++	sic.ingress_dest_dscp = msg->msg.rule_create.dscp_rule.ingress_return_dscp;
++
+ #ifdef CONFIG_XFRM
+ 	if (msg->msg.rule_create.valid_flags & SFE_RULE_CREATE_DIRECTION_VALID) {
+ 		sic.original_accel = msg->msg.rule_create.direction_rule.flow_accel;
+--- a/simulated-driver/sfe_drv.h
++++ b/simulated-driver/sfe_drv.h
+@@ -228,7 +228,8 @@ struct sfe_qos_rule {
+ struct sfe_dscp_rule {
+ 	u8 flow_dscp;		/**< Egress DSCP value for flow direction */
+ 	u8 return_dscp;		/**< Egress DSCP value for return direction */
+-	u8 reserved[2];		/**< Padded for alignment */
++	u8 ingress_flow_dscp;		/**< Ingress DSCP value for flow direction */
++	u8 ingress_return_dscp;		/**< Ingress DSCP value for return direction */
+ };
+ 
+ /**

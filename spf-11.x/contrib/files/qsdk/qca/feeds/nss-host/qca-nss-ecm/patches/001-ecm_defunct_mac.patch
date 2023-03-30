@@ -1,0 +1,52 @@
+Index: qca-nss-ecm/ecm_db/ecm_db.c
+===================================================================
+--- qca-nss-ecm.orig/ecm_db/ecm_db.c
++++ qca-nss-ecm/ecm_db/ecm_db.c
+@@ -205,6 +205,34 @@ static struct file_operations ecm_db_def
+ };
+ 
+ /*
++ * ecm_db_set_defunct_mac()
++ */
++static ssize_t ecm_db_set_defunct_mac(struct file *file,
++					const char __user *user_buf,
++					size_t sz, loff_t *ppos)
++{
++#define MAC_FMT "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx"
++	uint8_t mac_addr[ETH_ALEN];
++
++	if (sscanf(user_buf, MAC_FMT, mac_addr, mac_addr + 1, mac_addr + 2,
++			mac_addr + 3, mac_addr + 4, mac_addr + 5) != 6) {
++		DEBUG_TRACE("sscanf read error\n");
++		return -EINVAL;
++	}
++
++	ecm_interface_node_connections_defunct(mac_addr, ECM_DB_IP_VERSION_IGNORE);
++
++	return sz;
++}
++
++/*
++ * File operations for defunct_mac.
++ */
++static struct file_operations ecm_db_defunct_mac_fops = {
++	.write = ecm_db_set_defunct_mac,
++};
++
++/*
+  * ecm_db_ipv4_route_table_update_event()
+  *	This is a call back for "routing table update event for IPv4".
+  */
+@@ -454,6 +482,12 @@ int ecm_db_init(struct dentry *dentry)
+ 		goto init_cleanup_4;
+ 	}
+ 
++	if (!debugfs_create_file("defunct_mac", S_IRUGO | S_IWUSR, ecm_db_dentry,
++					NULL, &ecm_db_defunct_mac_fops)) {
++		DEBUG_ERROR("Failed to create ecm db defunct_mac file in debugfs\n");
++		goto init_cleanup_4;
++	}
++
+ 	if (!debugfs_create_file("defunct_all", S_IRUGO | S_IWUSR, ecm_db_dentry,
+ 					NULL, &ecm_db_defunct_all_fops)) {
+ 		DEBUG_ERROR("Failed to create ecm db defunct_all file in debugfs\n");

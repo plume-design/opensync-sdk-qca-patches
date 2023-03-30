@@ -1,0 +1,30 @@
+Without this patch OVS classifier will ignore FLUSH syncs, which also contain
+updated packet/byte counters. This leads to OVS flow stats being underreported.
+--- a/ecm_classifier_ovs.c
++++ b/ecm_classifier_ovs.c
+@@ -2080,9 +2080,10 @@ static void ecm_classifier_ovs_sync_to_v
+ 	}
+ 
+ 	/*
+-	 * Handle only the stats sync. We don't care about the evict or flush syncs.
++	 * Handle only the stats sync. We don't care about the evict syncs.
+ 	 */
+-	if (sync->reason != ECM_FRONT_END_IPV4_RULE_SYNC_REASON_STATS) {
++	if (sync->reason != ECM_FRONT_END_IPV4_RULE_SYNC_REASON_STATS &&
++	    sync->reason != ECM_FRONT_END_IPV4_RULE_SYNC_REASON_FLUSH) {
+ 		return;
+ 	}
+ 
+@@ -2119,9 +2120,10 @@ static void ecm_classifier_ovs_sync_to_v
+ 	}
+ 
+ 	/*
+-	 * Handle only the stats sync. We don't care about the evict or flush syncs.
++	 * Handle only the stats sync. We don't care about the evict syncs.
+ 	 */
+-	if (sync->reason != ECM_FRONT_END_IPV6_RULE_SYNC_REASON_STATS) {
++	if (sync->reason != ECM_FRONT_END_IPV6_RULE_SYNC_REASON_STATS &&
++	    sync->reason != ECM_FRONT_END_IPV6_RULE_SYNC_REASON_FLUSH) {
+ 		return;
+ 	}
+ 

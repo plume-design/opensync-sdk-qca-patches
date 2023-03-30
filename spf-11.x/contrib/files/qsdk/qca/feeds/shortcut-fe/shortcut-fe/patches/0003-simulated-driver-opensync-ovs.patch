@@ -1,0 +1,408 @@
+--- a/simulated-driver/sfe_drv.c
++++ b/simulated-driver/sfe_drv.c
+@@ -17,6 +17,7 @@
+ #include <linux/module.h>
+ #include <linux/version.h>
+ #include <linux/sysfs.h>
++#include <linux/debugfs.h>
+ #include <linux/skbuff.h>
+ #include <net/addrconf.h>
+ #include <linux/inetdevice.h>
+@@ -25,6 +26,13 @@
+ #include "../shortcut-fe/sfe.h"
+ #include "../shortcut-fe/sfe_cm.h"
+ #include "sfe_drv.h"
++#include <net/netfilter/nf_conntrack_acct.h>
++#include <net/netfilter/nf_conntrack_helper.h>
++#include <net/netfilter/nf_conntrack_zones.h>
++#include <net/netfilter/nf_conntrack_core.h>
++#include <net/netfilter/nf_conntrack_timeout.h>
++
++static struct dentry *sfe_drv_dentry;		/* Debugfs dentry object */
+ 
+ typedef enum sfe_drv_exception {
+ 	SFE_DRV_EXCEPTION_IPV4_MSG_UNKNOW,
+@@ -109,6 +117,7 @@ struct sfe_drv_ctx_instance_internal {
+ 	void *ipv6_stats_sync_data;	/* argument for above callback: ipv6_stats_sync_cb */
+ 
+ 	u32 exceptions[SFE_DRV_EXCEPTION_MAX];		/* statistics for exception */
++	struct notifier_block dev_notifier;	/* Device notifier */
+ };
+ 
+ static struct sfe_drv_ctx_instance_internal __sfe_drv_ctx;
+@@ -135,6 +144,45 @@ static inline void sfe_drv_incr_exceptio
+ 	spin_unlock_bh(&sfe_drv_ctx->lock);
+ }
+ 
++int g_accl_mode = 0;
++EXPORT_SYMBOL(g_accl_mode);
++int g_drv_l2uf = 1;
++EXPORT_SYMBOL(g_drv_l2uf);
++
++int force_pkt_deferral = 1;
++EXPORT_SYMBOL(force_pkt_deferral);
++int force_pkt_deferral_num = 50;
++EXPORT_SYMBOL(force_pkt_deferral_num);
++int sfe_default_force_pkt_deferral_counter = 0;
++EXPORT_SYMBOL(sfe_default_force_pkt_deferral_counter);
++
++int ovs_bridge_bypass_ctcheck = 1;
++int sfe_default_deferral_num = 25;
++int sfe_default_ct_zone = 1;
++int sfe_default_ctmark_inspect_counter = 0;
++int sfe_default_ctmark_permit_counter = 0;
++int sfe_default_ctmark_deny_counter = 0;
++int sfe_deferral_packet_counters = 0;
++int sfe_bypass_ctcheck_counter = 0;
++int sfe_create_rule_conflict = 0;
++
++static int sfe_drv_device_event(struct notifier_block *this, unsigned long event, void *ptr)
++{
++#if (LINUX_VERSION_CODE <= KERNEL_VERSION(3, 10, 0))
++	struct net_device *dev __attribute__ ((unused)) = (struct net_device *)ptr;
++#else
++	struct net_device *dev = netdev_notifier_info_to_dev(ptr);
++#endif
++
++	if (dev && ((event == NETDEV_DOWN) || (event == NETDEV_CHANGEUPPER)) ) {
++		sfe_ipv4_destroy_all_rules_for_dev(dev);
++		sfe_ipv6_destroy_all_rules_for_dev(dev);
++	}
++
++	return NOTIFY_DONE;
++}
++
++
+ /*
+  * sfe_drv_dev_is_layer_3_interface()
+  * 	check if a network device is ipv4 or ipv6 layer 3 interface
+@@ -149,6 +197,9 @@ inline bool sfe_drv_dev_is_layer_3_inter
+ 
+ 	BUG_ON(!dev);
+ 
++	if (dev->priv_flags & IFF_OVS_DATAPATH)
++		return true;
++
+ 	if (likely(check_v4)) {
+ 		/*
+ 		 * Does our input device support IPv4 processing?
+@@ -449,6 +500,7 @@ sfe_tx_status_t sfe_drv_create_ipv4_rule
+ 	struct net_device *dest_dev = NULL;
+ 	struct sfe_drv_response_msg *response;
+ 	enum sfe_cmn_response ret;
++	const unsigned char empty[ETH_ALEN] = { 0, };
+ 
+ 	response = sfe_drv_alloc_response_msg(SFE_DRV_MSG_TYPE_IPV4, msg);
+ 	if (!response) {
+@@ -476,6 +528,7 @@ sfe_tx_status_t sfe_drv_create_ipv4_rule
+ 	sic.dest_ip.ip = msg->msg.rule_create.tuple.return_ip;
+ 	sic.src_ip_xlate.ip = msg->msg.rule_create.conn_rule.flow_ip_xlate;
+ 	sic.dest_ip_xlate.ip = msg->msg.rule_create.conn_rule.return_ip_xlate;
++	sic.bridged = false;
+ 
+ 	sic.flags = 0;
+ 	switch (sic.protocol) {
+@@ -517,8 +570,14 @@ sfe_tx_status_t sfe_drv_create_ipv4_rule
+ 	}
+ 
+ 	memcpy(sic.src_mac, msg->msg.rule_create.conn_rule.flow_mac, ETH_ALEN);
+-	memset(sic.src_mac_xlate, 0, ETH_ALEN);
+-	memset(sic.dest_mac, 0, ETH_ALEN);
++	if (memcmp(msg->msg.rule_create.conn_rule.flow_mac_xlate, empty, ETH_ALEN) != 0)
++		memcpy(sic.src_mac_xlate, msg->msg.rule_create.conn_rule.flow_mac_xlate, ETH_ALEN);
++	else
++		memset(sic.src_mac_xlate, 0, ETH_ALEN);
++	if (memcmp(msg->msg.rule_create.conn_rule.return_mac_xlate, empty, ETH_ALEN) != 0)
++		memcpy(sic.dest_mac, msg->msg.rule_create.conn_rule.return_mac_xlate, ETH_ALEN);
++	else
++		memset(sic.dest_mac, 0, ETH_ALEN);
+ 	memcpy(sic.dest_mac_xlate, msg->msg.rule_create.conn_rule.return_mac, ETH_ALEN);
+ 
+ 	/*
+@@ -726,6 +785,7 @@ void sfe_drv_ipv4_notify_unregister(void
+ 		rcu_assign_pointer(sfe_drv_ctx->ipv4_stats_sync_cb, NULL);
+ 		sfe_drv_ctx->ipv4_stats_sync_data = NULL;
+ 	}
++
+ 	spin_unlock_bh(&sfe_drv_ctx->lock);
+ 
+ 	sfe_drv_clean_response_msg_by_type(sfe_drv_ctx, SFE_DRV_MSG_TYPE_IPV4);
+@@ -838,6 +898,7 @@ sfe_tx_status_t sfe_drv_create_ipv6_rule
+ 	struct net_device *dest_dev = NULL;
+ 	struct sfe_drv_response_msg *response;
+ 	enum sfe_cmn_response ret;
++	const unsigned char empty[ETH_ALEN] = { 0, };
+ 
+ 	response = sfe_drv_alloc_response_msg(SFE_DRV_MSG_TYPE_IPV6, msg);
+ 	if (!response) {
+@@ -865,6 +926,7 @@ sfe_tx_status_t sfe_drv_create_ipv6_rule
+ 	sfe_drv_ipv6_addr_copy(msg->msg.rule_create.tuple.return_ip, sic.dest_ip.ip6);
+ 	sfe_drv_ipv6_addr_copy(msg->msg.rule_create.tuple.flow_ip, sic.src_ip_xlate.ip6);
+ 	sfe_drv_ipv6_addr_copy(msg->msg.rule_create.tuple.return_ip, sic.dest_ip_xlate.ip6);
++	sic.bridged = false;
+ 
+ 	sic.flags = 0;
+ 	switch (sic.protocol) {
+@@ -906,8 +968,14 @@ sfe_tx_status_t sfe_drv_create_ipv6_rule
+ 	}
+ 
+ 	memcpy(sic.src_mac, msg->msg.rule_create.conn_rule.flow_mac, ETH_ALEN);
+-	memset(sic.src_mac_xlate, 0, ETH_ALEN);
+-	memset(sic.dest_mac, 0, ETH_ALEN);
++	if (memcmp(msg->msg.rule_create.conn_rule.flow_mac_xlate, empty, ETH_ALEN) != 0)
++		memcpy(sic.src_mac_xlate, msg->msg.rule_create.conn_rule.flow_mac_xlate, ETH_ALEN);
++	else
++		memset(sic.src_mac_xlate, 0, ETH_ALEN);
++	if (memcmp(msg->msg.rule_create.conn_rule.return_mac_xlate, empty, ETH_ALEN) != 0)
++		memcpy(sic.dest_mac, msg->msg.rule_create.conn_rule.return_mac_xlate, ETH_ALEN);
++	else
++		memset(sic.dest_mac, 0, ETH_ALEN);
+ 	memcpy(sic.dest_mac_xlate, msg->msg.rule_create.conn_rule.return_mac, ETH_ALEN);
+ 	/*
+ 	 * Does our input device support IP processing?
+@@ -1143,6 +1211,16 @@ void sfe_tun6rd_msg_init(struct sfe_tun6
+ }
+ EXPORT_SYMBOL(sfe_tun6rd_msg_init);
+ 
++void sfe_drv_debug_flush_by_mac(u8 *mac_addr)
++{
++	sfe_ipv4_destroy_all_rules_for_mac(mac_addr);
++	sfe_ipv6_destroy_all_rules_for_mac(mac_addr);
++
++	pr_debug("%s: flush by mac address: %pM\n", __FUNCTION__, mac_addr);
++	return;
++}
++EXPORT_SYMBOL(sfe_drv_debug_flush_by_mac);
++
+ /*
+  * sfe_drv_recv()
+  *	Handle packet receives.
+@@ -1198,6 +1276,20 @@ int sfe_drv_recv(struct sk_buff *skb)
+ 		}
+ 	}
+ 
++	if (g_drv_l2uf) {
++		/* Filter 802.2 frames, broadcast destination and packet length */
++		if (unlikely(skb->pkt_type == PACKET_BROADCAST &&
++				ntohs(skb->protocol) == ETH_P_802_2 &&
++				(skb->len == 6 || skb->len == 8))) {
++			/* Standard L2UF has skb->len=6, but QCA boards produce L2UF with skb->len=8 */
++			struct ethhdr *eth = eth_hdr(skb);
++			printk("%s: L2UF detected on device=%s len=%d\n", __func__, dev->name, skb->len);
++			if(eth) {
++				sfe_drv_debug_flush_by_mac(eth->h_source);
++			}
++		}
++	}
++
+ 	DEBUG_TRACE("not IP packet\n");
+ 	return 0;
+ }
+@@ -1225,6 +1317,44 @@ static ssize_t sfe_drv_get_exceptions(st
+ }
+ 
+ /*
++ * sfe_ipv4_debug_dev_write()
++ *	Write to char device resets some stats
++ */
++static ssize_t sfe_drv_debug_flush_mac_write(struct file *filp, const char *buffer, size_t length, loff_t *offset)
++{
++#define MAC_FMT "%hhx:%hhx:%hhx:%hhx:%hhx:%hhx"
++	uint8_t mac_addr[ETH_ALEN];
++
++	if (length == 0 || strstr(buffer, "ALL")) {
++		sfe_ipv4_destroy_all_rules_for_mac(NULL);
++		sfe_ipv6_destroy_all_rules_for_mac(NULL);
++		pr_info("flush ALL entries\n");
++		return length;
++	}
++
++	if (sscanf(buffer, MAC_FMT, mac_addr, mac_addr + 1, mac_addr + 2,
++			mac_addr + 3, mac_addr + 4, mac_addr + 5) != 6) {
++		pr_info("sscanf read error\n");
++		return -EINVAL;
++	}
++
++	pr_info("flush mac address: %pM\n", mac_addr);
++
++	sfe_ipv4_destroy_all_rules_for_mac(mac_addr);
++	sfe_ipv6_destroy_all_rules_for_mac(mac_addr);
++
++	return length;
++
++}
++
++/*
++ * File operations used in the debug char device
++ */
++static struct file_operations sfe_drv_debug_flush_mac_fops = {
++	.write = sfe_drv_debug_flush_mac_write,
++};
++
++/*
+  * sysfs attributes.
+  */
+ static const struct device_attribute sfe_drv_exceptions_attr =
+@@ -1256,11 +1386,116 @@ static int __init sfe_drv_init(void)
+ 		goto exit2;
+ 	}
+ 
++
++	/* create debug directory */
++	sfe_drv_dentry = debugfs_create_dir("sfe_drv", NULL);
++	if (!sfe_drv_dentry) {
++		DEBUG_ERROR("Failed to create sfe_drv directory in debugfs\n");
++		goto exit2;
++	}
++	if (!debugfs_create_u32("deferral_num", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_default_deferral_num)) {
++                DEBUG_ERROR("Failed to create deferral_num file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++	if (!debugfs_create_u32("default_conntrack_zone", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_default_ct_zone)) {
++                DEBUG_ERROR("Failed to create deafult ctmark zone file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("accl_inspect_cnt", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_default_ctmark_inspect_counter)) {
++                DEBUG_ERROR("Failed to create deafult classifier ctmark inspect counter file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("accl_permit_cnt", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_default_ctmark_permit_counter)) {
++                DEBUG_ERROR("Failed to create deafult classifier ctmark permit counter file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("accl_deny_cnt", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_default_ctmark_deny_counter)) {
++                DEBUG_ERROR("Failed to create deafult classifier ctmark deny counter file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("deferral_packet_counters", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_deferral_packet_counters)) {
++                DEBUG_ERROR("Failed to create deferral packet counter file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("accl_bypass_ctcheck_cnt", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_bypass_ctcheck_counter)) {
++                DEBUG_ERROR("Failed to create bypass ctmark check counter file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("accl_rule_conflict_cnt", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_create_rule_conflict)) {
++                DEBUG_ERROR("Failed to create accl rule conflict counter file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("bypass_ctcheck", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&ovs_bridge_bypass_ctcheck)) {
++                DEBUG_ERROR("Failed to create bypass ctmark flag file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("accl_mode", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&g_accl_mode)) {
++                DEBUG_ERROR("Failed to create global accl mode file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++
++	if (!debugfs_create_file("flush_mac", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++					NULL, &sfe_drv_debug_flush_mac_fops)) {
++		DEBUG_ERROR("Failed to create flush_mac file in debugfs\n");
++		debugfs_remove_recursive(sfe_drv_dentry);
++		goto exit2;
++	}
++        if (!debugfs_create_u32("drv_l2uf", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&g_drv_l2uf)) {
++                DEBUG_ERROR("Failed to create driver level l2uf file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("force_pkt_deferral", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&force_pkt_deferral)) {
++                DEBUG_ERROR("Failed to create driver level force_pkt_deferral file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("force_pkt_deferral_num", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&force_pkt_deferral_num)) {
++                DEBUG_ERROR("Failed to create driver level force_pkt_deferral_num file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++        if (!debugfs_create_u32("force_pkt_deferral_cnt", S_IRUGO | S_IWUSR, sfe_drv_dentry,
++                                        (u32 *)&sfe_default_force_pkt_deferral_counter)) {
++                DEBUG_ERROR("Failed to create driver level force_pkt_deferral_cnt file in debugfs\n");
++                debugfs_remove_recursive(sfe_drv_dentry);
++                goto exit2;
++        }
++
+ 	spin_lock_init(&sfe_drv_ctx->lock);
+ 
+ 	INIT_LIST_HEAD(&sfe_drv_ctx->msg_queue);
+ 	INIT_WORK(&sfe_drv_ctx->work, sfe_drv_process_response_msg);
+ 
++
++	/* register the netdev notifier */
++	sfe_drv_ctx->dev_notifier.notifier_call = sfe_drv_device_event;
++	sfe_drv_ctx->dev_notifier.priority = 1;
++	register_netdevice_notifier(&sfe_drv_ctx->dev_notifier);
++
+ 	/*
+ 	 * Hook the receive path in the network stack.
+ 	 */
+@@ -1309,6 +1544,17 @@ static void __exit sfe_drv_exit(void)
+ 	sfe_drv_ipv4_notify_unregister();
+ 	sfe_drv_ipv6_notify_unregister();
+ 
++
++	/*
++	 * Remove the debugfs files recursively.
++	 */
++	if (sfe_drv_dentry) {
++		debugfs_remove_recursive(sfe_drv_dentry);
++	}
++
++	/* unregister netdev notifier */
++	unregister_netdevice_notifier(&sfe_drv_ctx->dev_notifier);
++
+ 	kobject_put(sfe_drv_ctx->sys_sfe_drv);
+ 
+ 	return;
+--- a/simulated-driver/sfe_drv.h
++++ b/simulated-driver/sfe_drv.h
+@@ -65,6 +65,7 @@ typedef uint64_t sfe_ptr_t;
+ typedef uint32_t sfe_ptr_t;
+ #endif
+ 
++
+ typedef enum sfe_rule_sync_reason {
+ 	SFE_RULE_SYNC_REASON_STATS,	/* Sync is to synchronize stats */
+ 	SFE_RULE_SYNC_REASON_FLUSH,	/* Sync is to flush a entry */
+@@ -157,6 +158,8 @@ struct sfe_ipv6_5tuple {
+ struct sfe_ipv4_connection_rule {
+ 	u8 flow_mac[6];		/**< Flow MAC address */
+ 	u8 return_mac[6];		/**< Return MAC address */
++	u8 flow_mac_xlate[6];         /**< Flow MAC address after NATed */
++        u8 return_mac_xlate[6];               /**< Return MAC address after NATed */
+ 	s32 flow_interface_num;	/**< Flow interface number */
+ 	s32 return_interface_num;	/**< Return interface number */
+ 	s32 flow_top_interface_num;	/* Top flow interface number */
+@@ -175,6 +178,8 @@ struct sfe_ipv4_connection_rule {
+ struct sfe_ipv6_connection_rule {
+ 	u8 flow_mac[6];		/**< Flow MAC address */
+ 	u8 return_mac[6];		/**< Return MAC address */
++        u8 flow_mac_xlate[6];         /**< Flow MAC address after NATed */
++        u8 return_mac_xlate[6];               /**< Return MAC address after NATed */
+ 	s32 flow_interface_num;	/**< Flow interface number */
+ 	s32 return_interface_num;	/**< Return interface number */
+ 	s32 flow_top_interface_num;	/* Top flow interface number */

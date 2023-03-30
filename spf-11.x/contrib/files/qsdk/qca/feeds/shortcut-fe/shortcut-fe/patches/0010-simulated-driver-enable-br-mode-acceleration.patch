@@ -1,0 +1,48 @@
+--- a/simulated-driver/sfe_drv.c
++++ b/simulated-driver/sfe_drv.c
+@@ -517,21 +517,12 @@ sfe_tx_status_t sfe_drv_create_ipv4_rule
+ 		goto failed_ret;
+ 	}
+ 
+-	/*
+-	 * not support bridged flows now
+-	 */
+-	if (msg->msg.rule_create.rule_flags & SFE_RULE_CREATE_FLAG_BRIDGE_FLOW) {
+-		ret = SFE_CMN_RESPONSE_EINTERFACE;
+-		sfe_drv_incr_exceptions(SFE_DRV_EXCEPTION_NOT_SUPPORT_BRIDGE);
+-		goto failed_ret;
+-	}
+-
+ 	sic.protocol = msg->msg.rule_create.tuple.protocol;
+ 	sic.src_ip.ip = msg->msg.rule_create.tuple.flow_ip;
+ 	sic.dest_ip.ip = msg->msg.rule_create.tuple.return_ip;
+ 	sic.src_ip_xlate.ip = msg->msg.rule_create.conn_rule.flow_ip_xlate;
+ 	sic.dest_ip_xlate.ip = msg->msg.rule_create.conn_rule.return_ip_xlate;
+-	sic.bridged = false;
++	sic.bridged = (msg->msg.rule_create.rule_flags & SFE_RULE_CREATE_FLAG_BRIDGE_FLOW) ? true : false;
+ 
+ 	sic.flags = 0;
+ 	switch (sic.protocol) {
+@@ -924,21 +915,12 @@ sfe_tx_status_t sfe_drv_create_ipv6_rule
+ 		goto failed_ret;
+ 	}
+ 
+-	/*
+-	 * not support bridged flows now
+-	 */
+-	if (msg->msg.rule_create.rule_flags & SFE_RULE_CREATE_FLAG_BRIDGE_FLOW) {
+-		ret = SFE_CMN_RESPONSE_EINTERFACE;
+-		sfe_drv_incr_exceptions(SFE_DRV_EXCEPTION_NOT_SUPPORT_BRIDGE);
+-		goto failed_ret;
+-	}
+-
+ 	sic.protocol = msg->msg.rule_create.tuple.protocol;
+ 	sfe_drv_ipv6_addr_copy(msg->msg.rule_create.tuple.flow_ip, sic.src_ip.ip6);
+ 	sfe_drv_ipv6_addr_copy(msg->msg.rule_create.tuple.return_ip, sic.dest_ip.ip6);
+ 	sfe_drv_ipv6_addr_copy(msg->msg.rule_create.tuple.flow_ip, sic.src_ip_xlate.ip6);
+ 	sfe_drv_ipv6_addr_copy(msg->msg.rule_create.tuple.return_ip, sic.dest_ip_xlate.ip6);
+-	sic.bridged = false;
++	sic.bridged = (msg->msg.rule_create.rule_flags & SFE_RULE_CREATE_FLAG_BRIDGE_FLOW) ? true : false;
+ 
+ 	sic.flags = 0;
+ 	switch (sic.protocol) {

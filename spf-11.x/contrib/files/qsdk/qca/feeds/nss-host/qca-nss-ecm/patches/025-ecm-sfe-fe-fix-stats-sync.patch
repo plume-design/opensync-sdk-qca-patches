@@ -1,0 +1,252 @@
+--- a/frontends/sfe/ecm_sfe_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ipv4.c
+@@ -1297,9 +1297,14 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 	struct ecm_classifier_instance *assignments[ECM_CLASSIFIER_TYPES];
+ 	int aci_index;
+ 	int assignment_count;
++	int flow_ident;
++	int return_ident_xlate;
+ 	struct ecm_classifier_rule_sync class_sync;
+ 	int flow_dir;
+ 	int return_dir;
++	unsigned long int delta_jiffies;
++	int elapsed;
++
+ 
+ 	/*
+ 	 * Only respond to sync messages
+@@ -1327,6 +1332,17 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 	ECM_NIN4_ADDR_TO_IP_ADDR(flow_ip, sync->flow_ip);
+ 	ECM_NIN4_ADDR_TO_IP_ADDR(return_ip_xlate, sync->return_ip_xlate);
+ 	ECM_NIN4_ADDR_TO_IP_ADDR(return_ip, sync->return_ip);
++	flow_ident = (int)sync->flow_ident;
++	return_ident_xlate = (int)sync->return_ident_xlate;
++
++	/*
++	 * GRE connections such as PPTP-GRE are stored into the db using a 3 tuple based hash.
++	 * So we ignore the port information here when trying to lookup the connection
++	 */
++	if (sync->protocol == IPPROTO_GRE) {
++		flow_ident = 0;
++		return_ident_xlate = 0;
++	}
+ 
+ #ifdef ECM_MULTICAST_ENABLE
+ 	/*
+@@ -1342,7 +1358,7 @@ static void ecm_sfe_ipv4_stats_sync_call
+ #endif
+ 	if (!ci) {
+ 		DEBUG_TRACE("%px: SFE Sync: no connection\n", sync);
+-		goto sync_conntrack;
++		return;
+ 	}
+ 	DEBUG_TRACE("%px: Sync conn %px\n", sync, ci);
+ 
+@@ -1373,6 +1389,20 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 	ecm_db_connection_assignments_release(assignment_count, assignments);
+ 
+ 	/*
++	 * Get the elapsed time since the last sync and add this elapsed time
++	 * to the conntrack's timeout while updating it. If the return value is
++	 * a negative value which means the timer is not in a valid state, just
++	 * return here and do not update the defunct timer and the conntrack.
++	 */
++	elapsed = ecm_db_connection_elapsed_defunct_timer(ci);
++	if (elapsed < 0) {
++		ecm_db_connection_deref(ci);
++		return;
++	}
++	DEBUG_TRACE("%px: elapsed: %d\n", ci, elapsed);
++	delta_jiffies = elapsed * HZ;
++
++	/*
+ 	 * Keep connection alive and updated
+ 	 */
+ 	if (!ecm_db_connection_defunct_timer_touch(ci)) {
+@@ -1404,6 +1434,12 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 			feci->action_seen(feci);
+ 
+ 			/*
++			 * Update interface statistics
++			 */
++			ecm_interface_multicast_stats_update(ci, sync->flow_tx_packet_count, sync->flow_tx_byte_count, sync->flow_rx_packet_count, sync->flow_rx_byte_count,
++										sync->return_tx_packet_count, sync->return_tx_byte_count, sync->return_rx_packet_count, sync->return_rx_byte_count);
++
++			/*
+ 			 * Update IP multicast routing cache stats
+ 			 */
+ 			ipmr_mfc_stats_update(&init_net, htonl(flow_ip[0]), htonl(return_ip[0]), sync->flow_rx_packet_count,
+@@ -1424,6 +1460,11 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 			 */
+ 			feci->action_seen(feci);
+ 
++			/*
++			 * Update interface statistics
++			 */
++			ecm_interface_stats_update(ci, sync->flow_tx_packet_count, sync->flow_tx_byte_count, sync->flow_rx_packet_count, sync->flow_rx_byte_count,
++							sync->return_tx_packet_count, sync->return_tx_byte_count, sync->return_rx_packet_count, sync->return_rx_byte_count);
+ 		}
+ 
+ #else
+@@ -1442,6 +1483,11 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 		 */
+ 		feci->action_seen(feci);
+ 
++		/*
++		 * Update interface statistics
++		 */
++		ecm_interface_stats_update(ci, sync->flow_tx_packet_count, sync->flow_tx_byte_count, sync->flow_rx_packet_count, sync->flow_rx_byte_count,
++						sync->return_tx_packet_count, sync->return_tx_byte_count, sync->return_rx_packet_count, sync->return_rx_byte_count);
+ #endif
+ 	}
+ 
+@@ -1453,18 +1499,6 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 		 * NOTE: We take no action here since that is performed by the destroy message ack.
+ 		 */
+ 		DEBUG_INFO("%px: ECM initiated final sync seen: %d\n", ci, sync->reason);
+-
+-		/*
+-		 * If there is no tx/rx packets to update the other linux subsystems, we shouldn't continue
+-		 * for the sync message which comes as a final sync for the ECM initiated destroy request.
+-		 * Because this means the connection is not active for sometime and adding this delta time
+-		 * to the conntrack timeout will update it eventhough there is no traffic for this connection.
+-		 */
+-		if (!sync->flow_tx_packet_count && !sync->return_tx_packet_count) {
+-			feci->deref(feci);
+-			ecm_db_connection_deref(ci);
+-			return;
+-		}
+ 		break;
+ 	case SFE_RULE_SYNC_REASON_FLUSH:
+ 	case SFE_RULE_SYNC_REASON_EVICT:
+@@ -1589,16 +1623,6 @@ sync_conntrack:
+ 	 * Only update if this is not a fixed timeout
+ 	 */
+ 	if (!test_bit(IPS_FIXED_TIMEOUT_BIT, &ct->status)) {
+-		unsigned long int delta_jiffies;
+-
+-		/*
+-		 * Convert ms ticks from the SFE to jiffies. We know that inc_ticks is small
+-		 * and we expect HZ to be small too so we can multiply without worrying about
+-		 * wrap-around problems.  We add a rounding constant to ensure that the different
+-		 * time bases don't cause truncation errors.
+-		 */
+-		delta_jiffies = ((sync->inc_ticks * HZ) + (MSEC_PER_SEC / 2)) / MSEC_PER_SEC;
+-
+ 		spin_lock_bh(&ct->lock);
+ #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0))
+ 		ct->timeout.expires += delta_jiffies;
+--- a/frontends/sfe/ecm_sfe_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ipv6.c
+@@ -1112,6 +1112,8 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 	struct ecm_classifier_rule_sync class_sync;
+ 	int flow_dir;
+ 	int return_dir;
++	unsigned long int delta_jiffies;
++	int elapsed;
+ 
+ 	/*
+ 	 * Only respond to sync messages
+@@ -1142,7 +1144,7 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 	ci = ecm_db_connection_find_and_ref(flow_ip, return_ip, sync->protocol, (int)ntohs(sync->flow_ident), (int)ntohs(sync->return_ident));
+ 	if (!ci) {
+ 		DEBUG_TRACE("%px: SFE Sync: no connection\n", sync);
+-		goto sync_conntrack;
++		return;
+ 	}
+ 	DEBUG_TRACE("%px: Sync conn %px\n", sync, ci);
+ 
+@@ -1173,6 +1175,19 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 	ecm_db_connection_assignments_release(assignment_count, assignments);
+ 
+ 	/*
++	 * Get the elapsed time since the last sync and add this elapsed time
++	 * to the conntrack's timeout while updating it. If the return value is
++	 * a negative value which means the timer is not in a valid state, just
++	 * return here and do not update the defunct timer and the conntrack.
++	 */
++	elapsed = ecm_db_connection_elapsed_defunct_timer(ci);
++	if (elapsed < 0) {
++		ecm_db_connection_deref(ci);
++		return;
++	}
++	delta_jiffies = elapsed * HZ;
++
++	/*
+ 	 * Keep connection alive and updated
+ 	 */
+ 	if (!ecm_db_connection_defunct_timer_touch(ci)) {
+@@ -1198,6 +1213,12 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 			ecm_db_multicast_connection_data_totals_update(ci, true, sync->return_rx_byte_count, sync->return_rx_packet_count);
+ 			ecm_db_multicast_connection_interface_heirarchy_stats_update(ci, sync->flow_rx_byte_count, sync->flow_rx_packet_count);
+ 
++			/*
++			 * Update interface statistics
++			 */
++			ecm_interface_multicast_stats_update(ci, sync->flow_tx_packet_count, sync->flow_tx_byte_count, sync->flow_rx_packet_count, sync->flow_rx_byte_count,
++										sync->return_tx_packet_count, sync->return_tx_byte_count, sync->return_rx_packet_count, sync->return_rx_byte_count);
++
+ 			ECM_IP_ADDR_TO_NIN6_ADDR(origin6, flow_ip);
+ 			ECM_IP_ADDR_TO_NIN6_ADDR(group6, return_ip);
+ 
+@@ -1217,7 +1238,11 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 			 * The amount of data *sent* by the ECM connection 'to' side is the amount the SFE has *received* in the 'return' direction.
+ 			 */
+ 			ecm_db_connection_data_totals_update(ci, false, sync->return_rx_byte_count, sync->return_rx_packet_count);
+-
++			/*
++			 * Update interface statistics
++			 */
++			ecm_interface_stats_update(ci, sync->flow_tx_packet_count, sync->flow_tx_byte_count, sync->flow_rx_packet_count, sync->flow_rx_byte_count,
++						sync->return_tx_packet_count, sync->return_tx_byte_count, sync->return_rx_packet_count, sync->return_rx_byte_count);
+ 		}
+ 
+ 		/*
+@@ -1240,6 +1265,11 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 		 */
+ 		feci->action_seen(feci);
+ 
++		/*
++		 * Update interface statistics
++		 */
++		ecm_interface_stats_update(ci, sync->flow_tx_packet_count, sync->flow_tx_byte_count, sync->flow_rx_packet_count, sync->flow_rx_byte_count,
++						sync->return_tx_packet_count, sync->return_tx_byte_count, sync->return_rx_packet_count, sync->return_rx_byte_count);
+ #endif
+ 	}
+ 
+@@ -1251,18 +1281,6 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 		 * NOTE: We take no action here since that is performed by the destroy message ack.
+ 		 */
+ 		DEBUG_INFO("%px: ECM initiated final sync seen: %d\n", ci, sync->reason);
+-
+-		/*
+-		 * If there is no tx/rx packets to update the other linux subsystems, we shouldn't continue
+-		 * for the sync message which comes as a final sync for the ECM initiated destroy request.
+-		 * Because this means the connection is not active for sometime and adding this delta time
+-		 * to the conntrack timeout will update it eventhough there is no traffic for this connection.
+-		 */
+-		if (!sync->flow_tx_packet_count && !sync->return_tx_packet_count) {
+-			feci->deref(feci);
+-			ecm_db_connection_deref(ci);
+-			return;
+-		}
+ 		break;
+ 	case SFE_RULE_SYNC_REASON_FLUSH:
+ 	case SFE_RULE_SYNC_REASON_EVICT:
+@@ -1387,16 +1405,6 @@ sync_conntrack:
+ 	 * Only update if this is not a fixed timeout
+ 	 */
+ 	if (!test_bit(IPS_FIXED_TIMEOUT_BIT, &ct->status)) {
+-		unsigned long int delta_jiffies;
+-
+-		/*
+-		 * Convert ms ticks from the SFE to jiffies. We know that inc_ticks is small
+-		 * and we expect HZ to be small too so we can multiply without worrying about
+-		 * wrap-around problems.  We add a rounding constant to ensure that the different
+-		 * time bases don't cause truncation errors.
+-		 */
+-		delta_jiffies = ((sync->inc_ticks * HZ) + (MSEC_PER_SEC / 2)) / MSEC_PER_SEC;
+-
+ 		spin_lock_bh(&ct->lock);
+ #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 9, 0))
+ 		ct->timeout.expires += delta_jiffies;

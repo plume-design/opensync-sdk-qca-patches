@@ -1,0 +1,222 @@
+--- a/ecm_classifier.h
++++ b/ecm_classifier.h
+@@ -133,6 +133,9 @@ struct ecm_classifier_process_response {
+ #endif
+ 	uint8_t flow_dscp;				/* DSCP mark for flow */
+ 	uint8_t return_dscp;				/* DSCP mark for return */
++
++	uint8_t ingress_flow_dscp;				/* DSCP mark for flow of ingress flow */
++	uint8_t ingress_return_dscp;				/* DSCP mark for return ingress flow */
+ #endif
+ #ifdef ECM_CLASSIFIER_OVS_ENABLE
+ 	uint32_t ingress_vlan_tag[2];			/* Ingress VLAN tags */
+--- a/ecm_classifier_ovs.c
++++ b/ecm_classifier_ovs.c
+@@ -298,6 +298,8 @@ int ecm_classifier_ovs_flow_find(struct
+ 	ecvi->process_response.egress_vlan_tag[0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+ 	ecvi->process_response.ingress_vlan_tag[1] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+ 	ecvi->process_response.egress_vlan_tag[1] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
++	ecvi->process_response.ingress_flow_dscp = 0;
++	ecvi->process_response.ingress_return_dscp = 0;
+ 
+ 	if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
+ 		ecvi->src_flow_acquired = true;
+@@ -353,17 +355,17 @@ int ecm_classifier_ovs_flow_find(struct
+ 
+ 	/* Parse DSCP from SKB */
+ 	if (flow->tuple.ip_version == 4) {
+-		struct iphdr *nh = ip_hdr(skb);
+-		tos = nh->tos >> XT_DSCP_SHIFT;
++		tos = ipv4_get_dsfield(ip_hdr(skb)) >> XT_DSCP_SHIFT;
+ 	} else {
+-		struct ipv6hdr *nh = ipv6_hdr(skb);
+-		tos = ipv6_get_dsfield(nh) >> XT_DSCP_SHIFT;
++		tos = ipv6_get_dsfield(ipv6_hdr(skb)) >> XT_DSCP_SHIFT;
+ 	}
+ 	if (tos) {
+ 		if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
+ 			ecvi->process_response.flow_dscp = tos;
++			ecvi->process_response.ingress_flow_dscp = tos;
+ 		} else {
+ 			ecvi->process_response.return_dscp = tos;
++			ecvi->process_response.ingress_return_dscp = tos;
+ 		}
+ 		ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_DSCP;
+ 	}
+--- a/frontends/sfe/ecm_sfe_non_ported_ipv4.c
++++ b/frontends/sfe/ecm_sfe_non_ported_ipv4.c
+@@ -937,6 +937,9 @@ static void ecm_sfe_non_ported_ipv4_conn
+ 		nircm->rule_flags |= SFE_RULE_CREATE_FLAG_DSCP_MARKING;
+ 		nircm->valid_flags |= SFE_RULE_CREATE_DSCP_MARKING_VALID;
+ 	}
++
++	nircm->dscp_rule.ingress_flow_dscp = pr->ingress_flow_dscp;
++	nircm->dscp_rule.ingress_return_dscp = pr->ingress_return_dscp;
+ #endif
+ 
+ #ifdef CONFIG_XFRM
+@@ -1086,7 +1089,9 @@ static void ecm_sfe_non_ported_ipv4_conn
+ 			"flow_qos_tag: %x (%u)\n"
+ 			"return_qos_tag: %x (%u)\n"
+ 			"flow_dscp: %x\n"
+-			"return_dscp: %x\n",
++			"return_dscp: %x\n"
++			"i_flow_dscp: %x\n"
++			"i_return_dscp: %x\n",
+ 			nnpci,
+ 			feci->ci,
+ 			nircm->tuple.protocol,
+@@ -1113,7 +1118,9 @@ static void ecm_sfe_non_ported_ipv4_conn
+ 			nircm->qos_rule.flow_qos_tag, nircm->qos_rule.flow_qos_tag,
+ 			nircm->qos_rule.return_qos_tag, nircm->qos_rule.return_qos_tag,
+ 			nircm->dscp_rule.flow_dscp,
+-			nircm->dscp_rule.return_dscp);
++			nircm->dscp_rule.return_dscp,
++			nircm->dscp_rule.ingress_flow_dscp,
++			nircm->dscp_rule.ingress_return_dscp);
+ 
+ 	/*
+ 	 * Now that the rule has been constructed we re-compare the generation occurrance counter.
+@@ -2250,6 +2257,9 @@ done:
+ 				prevalent_pr.return_dscp = aci_pr.return_dscp;
+ 			}
+ 		}
++
++		prevalent_pr.ingress_flow_dscp = aci_pr.ingress_flow_dscp;
++		prevalent_pr.ingress_return_dscp = aci_pr.ingress_return_dscp;
+ #endif
+ 	}
+ 	ecm_db_connection_assignments_release(assignment_count, assignments);
+--- a/frontends/sfe/ecm_sfe_non_ported_ipv6.c
++++ b/frontends/sfe/ecm_sfe_non_ported_ipv6.c
+@@ -873,6 +873,9 @@ static void ecm_sfe_non_ported_ipv6_conn
+ 		nircm->rule_flags |= SFE_RULE_CREATE_FLAG_DSCP_MARKING;
+ 		nircm->valid_flags |= SFE_RULE_CREATE_DSCP_MARKING_VALID;
+ 	}
++
++	nircm->dscp_rule.ingress_flow_dscp = pr->ingress_flow_dscp;
++	nircm->dscp_rule.ingress_return_dscp = pr->ingress_return_dscp;
+ #endif
+ 
+ #ifdef CONFIG_XFRM
+@@ -973,7 +976,9 @@ static void ecm_sfe_non_ported_ipv6_conn
+ 			"flow_qos_tag: %x (%u)\n"
+ 			"return_qos_tag: %x (%u)\n"
+ 			"flow_dscp: %x\n"
+-			"return_dscp: %x\n",
++			"return_dscp: %x\n"
++			"i_flow_dscp: %x\n"
++			"i_return_dscp: %x\n",
+ 			nnpci,
+ 			feci->ci,
+ 			nircm->tuple.protocol,
+@@ -998,7 +1003,9 @@ static void ecm_sfe_non_ported_ipv6_conn
+ 			nircm->qos_rule.flow_qos_tag, nircm->qos_rule.flow_qos_tag,
+ 			nircm->qos_rule.return_qos_tag, nircm->qos_rule.return_qos_tag,
+ 			nircm->dscp_rule.flow_dscp,
+-			nircm->dscp_rule.return_dscp);
++			nircm->dscp_rule.return_dscp,
++			nircm->dscp_rule.ingress_flow_dscp,
++			nircm->dscp_rule.ingress_return_dscp);
+ 
+ 	/*
+ 	 * Now that the rule has been constructed we re-compare the generation occurrance counter.
+@@ -2067,6 +2074,9 @@ done:
+ 				prevalent_pr.return_dscp = aci_pr.return_dscp;
+ 			}
+ 		}
++
++		prevalent_pr.ingress_flow_dscp = aci_pr.ingress_flow_dscp;
++		prevalent_pr.ingress_return_dscp = aci_pr.ingress_return_dscp;
+ #endif
+ 	}
+ 	ecm_db_connection_assignments_release(assignment_count, assignments);
+--- a/frontends/sfe/ecm_sfe_ported_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv4.c
+@@ -890,6 +890,10 @@ static void ecm_sfe_ported_ipv4_connecti
+ 		nircm->rule_flags |= SFE_RULE_CREATE_FLAG_DSCP_MARKING;
+ 		nircm->valid_flags |= SFE_RULE_CREATE_DSCP_MARKING_VALID;
+ 	}
++
++	nircm->dscp_rule.ingress_flow_dscp = pr->ingress_flow_dscp;
++	nircm->dscp_rule.ingress_return_dscp = pr->ingress_return_dscp;
++
+ #endif
+ 
+ #ifdef CONFIG_XFRM
+@@ -1122,7 +1126,9 @@ static void ecm_sfe_ported_ipv4_connecti
+ 			"return_end: %u\n"
+ 			"return_max_end: %u\n"
+ 			"flow_dscp: %x\n"
+-			"return_dscp: %x\n",
++			"return_dscp: %x\n"
++			"i_flow_dscp: %x\n"
++			"i_return_dscp: %x\n",
+ 			npci,
+ 			feci->ci,
+ 			nircm->tuple.protocol,
+@@ -1157,7 +1163,9 @@ static void ecm_sfe_ported_ipv4_connecti
+ 			nircm->tcp_rule.return_end,
+ 			nircm->tcp_rule.return_max_end,
+ 			nircm->dscp_rule.flow_dscp,
+-			nircm->dscp_rule.return_dscp);
++			nircm->dscp_rule.return_dscp,
++			nircm->dscp_rule.ingress_flow_dscp,
++			nircm->dscp_rule.ingress_return_dscp);
+ 
+ 	if (protocol == IPPROTO_TCP) {
+ 
+@@ -2547,6 +2555,9 @@ done:
+ 				prevalent_pr.return_dscp = aci_pr.return_dscp;
+ 			}
+ 		}
++
++		prevalent_pr.ingress_flow_dscp = aci_pr.ingress_flow_dscp;
++		prevalent_pr.ingress_return_dscp = aci_pr.ingress_return_dscp;
+ #endif
+ 
+ #ifdef ECM_CLASSIFIER_OVS_ENABLE
+--- a/frontends/sfe/ecm_sfe_ported_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv6.c
+@@ -895,6 +895,9 @@ static void ecm_sfe_ported_ipv6_connecti
+ 		nircm->rule_flags |= SFE_RULE_CREATE_FLAG_DSCP_MARKING;
+ 		nircm->valid_flags |= SFE_RULE_CREATE_DSCP_MARKING_VALID;
+ 	}
++
++	nircm->dscp_rule.ingress_flow_dscp = pr->ingress_flow_dscp;
++	nircm->dscp_rule.ingress_return_dscp = pr->ingress_return_dscp;
+ #endif
+ 
+ #ifdef CONFIG_XFRM
+@@ -1071,7 +1074,9 @@ static void ecm_sfe_ported_ipv6_connecti
+ 			"flow_qos_tag: %x (%u)\n"
+ 			"return_qos_tag: %x (%u)\n"
+ 			"flow_dscp: %x\n"
+-			"return_dscp: %x\n",
++			"return_dscp: %x\n"
++			"i_flow_dscp: %x\n"
++			"i_return_dscp: %x\n",
+ 			npci,
+ 			feci->ci,
+ 			nircm->tuple.protocol,
+@@ -1096,7 +1101,9 @@ static void ecm_sfe_ported_ipv6_connecti
+ 			nircm->qos_rule.flow_qos_tag, nircm->qos_rule.flow_qos_tag,
+ 			nircm->qos_rule.return_qos_tag, nircm->qos_rule.return_qos_tag,
+ 			nircm->dscp_rule.flow_dscp,
+-			nircm->dscp_rule.return_dscp);
++			nircm->dscp_rule.return_dscp,
++			nircm->dscp_rule.ingress_flow_dscp,
++			nircm->dscp_rule.ingress_return_dscp);
+ 
+ 	if (protocol == IPPROTO_TCP) {
+ 		DEBUG_INFO("flow_window_scale: %u\n"
+@@ -2393,6 +2400,9 @@ done:
+ 				prevalent_pr.return_dscp = aci_pr.return_dscp;
+ 			}
+ 		}
++
++		prevalent_pr.ingress_flow_dscp = aci_pr.ingress_flow_dscp;
++		prevalent_pr.ingress_return_dscp = aci_pr.ingress_return_dscp;
+ #endif
+ 
+ #ifdef ECM_CLASSIFIER_OVS_ENABLE

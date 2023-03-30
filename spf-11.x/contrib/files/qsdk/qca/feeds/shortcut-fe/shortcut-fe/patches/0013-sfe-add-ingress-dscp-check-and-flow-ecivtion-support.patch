@@ -1,0 +1,348 @@
+--- a/shortcut-fe/sfe_cm.h
++++ b/shortcut-fe/sfe_cm.h
+@@ -76,6 +76,10 @@ struct sfe_connection_create {
+ 	u32 dest_priority;
+ 	u32 src_dscp;
+ 	u32 dest_dscp;
++
++	u32 ingress_src_dscp;
++	u32 ingress_dest_dscp;
++
+ 	bool bridged;
+ 	__be16 src_vlan_proto;
+ 	u16 src_vlan_tci;
+@@ -102,8 +106,9 @@ struct sfe_connection_destroy {
+ 
+ typedef enum sfe_sync_reason {
+ 	SFE_SYNC_REASON_STATS,	/* Sync is to synchronize stats */
+-	SFE_SYNC_REASON_FLUSH,	/* Sync is to flush a entry */
+-	SFE_SYNC_REASON_DESTROY	/* Sync is to destroy a entry(requested by connection manager) */
++	SFE_SYNC_REASON_FLUSH,	/* Sync is to flush an entry */
++	SFE_SYNC_REASON_EVICT,  /* Sync is to evict an entry */
++	SFE_SYNC_REASON_DESTROY	/* Sync is to destroy an entry(requested by connection manager) */
+ } sfe_sync_reason_t;
+ 
+ /*
+--- a/shortcut-fe/sfe_ipv4.c
++++ b/shortcut-fe/sfe_ipv4.c
+@@ -23,6 +23,7 @@
+ #include <linux/etherdevice.h>
+ #include <linux/version.h>
+ #include <linux/if_vlan.h>
++#include <linux/netfilter/xt_dscp.h>
+ 
+ #include "sfe.h"
+ #include "sfe_cm.h"
+@@ -246,6 +247,7 @@ struct sfe_ipv4_connection_match {
+ 	 */
+ 	u32 priority;
+ 	u32 dscp;
++	u32 ingress_dscp;
+ 
+ 	/*
+ 	 * Packet transmit information.
+@@ -367,6 +369,7 @@ enum sfe_ipv4_exception_events {
+ 	SFE_IPV4_EXCEPTION_EVENT_DATAGRAM_INCOMPLETE,
+ 	SFE_IPV4_EXCEPTION_EVENT_IP_OPTIONS_INCOMPLETE,
+ 	SFE_IPV4_EXCEPTION_EVENT_UNHANDLED_PROTOCOL,
++	SFE_IPV4_EXCEPTION_EVENT_DSCP_UPDATE,
+ 	SFE_IPV4_EXCEPTION_EVENT_LAST
+ };
+ 
+@@ -406,6 +409,7 @@ static char *sfe_ipv4_exception_events_s
+ 	"NON_INITIAL_FRAGMENT",
+ 	"DATAGRAM_INCOMPLETE",
+ 	"IP_OPTIONS_INCOMPLETE",
++	"DSCP_UPDATE",
+ 	"UNHANDLED_PROTOCOL"
+ };
+ 
+@@ -1210,6 +1214,7 @@ static int sfe_ipv4_recv_udp(struct sfe_
+ 	struct sfe_ipv4_udp_hdr *udph;
+ 	__be32 src_ip;
+ 	__be32 dest_ip;
++	__be32 dscp;
+ 	__be16 src_port;
+ 	__be16 dest_port;
+ 	struct sfe_ipv4_connection_match *cm;
+@@ -1241,6 +1246,7 @@ static int sfe_ipv4_recv_udp(struct sfe_
+ 	udph = (struct sfe_ipv4_udp_hdr *)(skb->data + ihl);
+ 	src_port = udph->source;
+ 	dest_port = udph->dest;
++	dscp = ipv4_get_dsfield(ip_hdr(skb)) >> XT_DSCP_SHIFT;
+ 
+ 	dont_forward = (htons(src_port) == 53 || htons(dest_port) == 53);
+ 	if (unlikely(dont_forward))
+@@ -1285,6 +1291,22 @@ static int sfe_ipv4_recv_udp(struct sfe_
+ 		return 0;
+ 	}
+ 
++	if (cm->connection->bridged && cm->ingress_dscp != dscp)
++	{
++		struct sfe_ipv4_connection *c = cm->connection;
++		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
++		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_DSCP_UPDATE]++;
++		si->packets_not_forwarded++;
++		spin_unlock_bh(&si->lock);
++
++		DEBUG_TRACE("dscp update detected:%d -> %d for connection: %pI4->%pI4, %u->%u, proto: UDP\n",
++			dscp, cm->dscp,
++			&src_ip, &dest_ip,
++			ntohs(src_port), ntohs(dest_port));
++		sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_EVICT);
++		return 0;
++	}
++
+ #ifdef CONFIG_XFRM
+ 	/*
+ 	 * We can't accelerate the flow on this direction, just let it go
+@@ -1601,6 +1623,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_
+ 	struct sfe_ipv4_tcp_hdr *tcph;
+ 	__be32 src_ip;
+ 	__be32 dest_ip;
++	__be32 dscp;
+ 	__be16 src_port;
+ 	__be16 dest_port;
+ 	struct sfe_ipv4_connection_match *cm;
+@@ -1635,6 +1658,7 @@ static int sfe_ipv4_recv_tcp(struct sfe_
+ 	src_port = tcph->source;
+ 	dest_port = tcph->dest;
+ 	flags = tcp_flag_word(tcph);
++	dscp = ipv4_get_dsfield(ip_hdr(skb)) >> XT_DSCP_SHIFT;
+ 
+ 	spin_lock_bh(&si->lock);
+ 
+@@ -1689,6 +1713,22 @@ static int sfe_ipv4_recv_tcp(struct sfe_
+ 		return 0;
+ 	}
+ 
++	if (cm->connection->bridged && cm->ingress_dscp != dscp)
++	{
++		struct sfe_ipv4_connection *c = cm->connection;
++		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
++		si->exception_events[SFE_IPV4_EXCEPTION_EVENT_DSCP_UPDATE]++;
++		si->packets_not_forwarded++;
++		spin_unlock_bh(&si->lock);
++
++		DEBUG_TRACE("dscp update detected:%d -> %d for connection: %pI4->%pI4, %u->%u, proto: TCP\n",
++			dscp, cm->dscp,
++			&src_ip, &dest_ip,
++			ntohs(src_port), ntohs(dest_port));
++		sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_EVICT);
++		return 0;
++	}
++
+ #ifdef CONFIG_XFRM
+ 	/*
+ 	 * We can't accelerate the flow on this direction, just let it go
+@@ -2118,6 +2158,7 @@ static int sfe_ipv4_recv_icmp(struct sfe
+ 	struct sfe_ipv4_tcp_hdr *icmp_tcph;
+ 	__be32 src_ip;
+ 	__be32 dest_ip;
++	__be32 dscp;
+ 	__be16 src_port;
+ 	__be16 dest_port;
+ 	struct sfe_ipv4_connection_match *cm;
+@@ -2259,6 +2300,8 @@ static int sfe_ipv4_recv_icmp(struct sfe
+ 
+ 	src_ip = icmp_iph->saddr;
+ 	dest_ip = icmp_iph->daddr;
++	dscp = ipv4_get_dsfield(ip_hdr(skb)) >> XT_DSCP_SHIFT;
++
+ 
+ 	spin_lock_bh(&si->lock);
+ 
+@@ -2636,6 +2679,7 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	original_cm->match_src_vlan_tci = sic->src_vlan_tci;
+ 	original_cm->match_dest_vlan_proto = sic->dest_vlan_proto;
+ 	original_cm->match_dest_vlan_tci = sic->dest_vlan_tci;
++	original_cm->ingress_dscp = sic->ingress_src_dscp;
+ 
+ 	if (sic->bridged) {
+ 		memcpy(original_cm->xmit_src_mac, sic->src_mac, ETH_ALEN); 
+@@ -2712,6 +2756,7 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	reply_cm->match_src_vlan_tci = sic->dest_vlan_tci;
+ 	reply_cm->match_dest_vlan_proto = sic->src_vlan_proto;
+ 	reply_cm->match_dest_vlan_tci = sic->src_vlan_tci;
++	reply_cm->ingress_dscp = sic->ingress_dest_dscp;
+ 
+ 	if (sic->bridged) {
+ 		memcpy(reply_cm->xmit_src_mac, sic->dest_mac_xlate, ETH_ALEN);
+@@ -2970,7 +3015,7 @@ another_round:
+ 	}
+ 
+ 	if (flushed) {
+-		printk("%s: flushed %d flows for due to timeout\n", __func__, flushed);
++		DEBUG_TRACE("%s: flushed %d flows for due to timeout\n", __func__, flushed);
+ 	}
+ }
+ 
+@@ -3022,7 +3067,7 @@ another_round:
+ 	}
+ 
+ 	if (flushed) {
+-		printk("%s: flushed %d flows for dev=%s\n", __func__, flushed, dev ? dev->name : "all");
++		DEBUG_TRACE("%s: flushed %d flows for dev=%s\n", __func__, flushed, dev ? dev->name : "all");
+ 	}
+ }
+ 
+@@ -3073,7 +3118,7 @@ another_round:
+ 	}
+ 
+ 	if (flushed) {
+-		printk("%s: flushed %d flows for mac=%pM\n", __func__, flushed, mac_addr);
++		DEBUG_TRACE("%s: flushed %d flows for mac=%pM\n", __func__, flushed, mac_addr);
+ 	}
+ }
+ 
+--- a/shortcut-fe/sfe_ipv6.c
++++ b/shortcut-fe/sfe_ipv6.c
+@@ -23,6 +23,7 @@
+ #include <linux/etherdevice.h>
+ #include <linux/version.h>
+ #include <linux/if_vlan.h>
++#include <linux/netfilter/xt_dscp.h>
+ 
+ #include "sfe.h"
+ #include "sfe_cm.h"
+@@ -270,6 +271,7 @@ struct sfe_ipv6_connection_match {
+ 	 */
+ 	u32 priority;
+ 	u32 dscp;
++	u32 ingress_dscp;
+ 
+ 	/*
+ 	 * Packet transmit information.
+@@ -389,6 +391,7 @@ enum sfe_ipv6_exception_events {
+ 	SFE_IPV6_EXCEPTION_EVENT_IP_OPTIONS_INCOMPLETE,
+ 	SFE_IPV6_EXCEPTION_EVENT_UNHANDLED_PROTOCOL,
+ 	SFE_IPV6_EXCEPTION_EVENT_FLOW_COOKIE_ADD_FAIL,
++	SFE_IPV6_EXCEPTION_EVENT_DSCP_UPDATE,
+ 	SFE_IPV6_EXCEPTION_EVENT_LAST
+ };
+ 
+@@ -429,7 +432,8 @@ static char *sfe_ipv6_exception_events_s
+ 	"DATAGRAM_INCOMPLETE",
+ 	"IP_OPTIONS_INCOMPLETE",
+ 	"UNHANDLED_PROTOCOL",
+-	"FLOW_COOKIE_ADD_FAIL"
++	"FLOW_COOKIE_ADD_FAIL",
++	"DSCPv6_UPDATE"
+ };
+ 
+ /*
+@@ -1268,6 +1272,7 @@ static int sfe_ipv6_recv_udp(struct sfe_
+ 	struct sfe_ipv6_addr *dest_ip;
+ 	__be16 src_port;
+ 	__be16 dest_port;
++	__be32 dscp;
+ 	struct sfe_ipv6_connection_match *cm;
+ 	struct net_device *xmit_dev;
+ 
+@@ -1295,6 +1300,7 @@ static int sfe_ipv6_recv_udp(struct sfe_
+ 	udph = (struct sfe_ipv6_udp_hdr *)(skb->data + ihl);
+ 	src_port = udph->source;
+ 	dest_port = udph->dest;
++	dscp = ipv6_get_dsfield(ipv6_hdr(skb)) >> XT_DSCP_SHIFT;
+ 
+ 	spin_lock_bh(&si->lock);
+ 
+@@ -1335,6 +1341,19 @@ static int sfe_ipv6_recv_udp(struct sfe_
+ 		return 0;
+ 	}
+ 
++	if (cm->connection->bridged && cm->ingress_dscp != dscp)
++	{
++		struct sfe_ipv6_connection *c = cm->connection;
++		sfe_ipv6_remove_connection(si, c);
++		si->exception_events[SFE_IPV6_EXCEPTION_EVENT_DSCP_UPDATE]++;
++		si->packets_not_forwarded++;
++		spin_unlock_bh(&si->lock);
++
++		DEBUG_TRACE("dscp update detected v6:%d -> %d\n", dscp, cm->dscp);
++		sfe_ipv6_flush_connection(si, c, SFE_SYNC_REASON_EVICT);
++		return 0;
++	}
++
+ #ifdef CONFIG_XFRM
+ 	/*
+ 	 * We can't accelerate the flow on this direction, just let it go
+@@ -1633,6 +1652,7 @@ static int sfe_ipv6_recv_tcp(struct sfe_
+ 	struct sfe_ipv6_addr *dest_ip;
+ 	__be16 src_port;
+ 	__be16 dest_port;
++	__be32 dscp;
+ 	struct sfe_ipv6_connection_match *cm;
+ 	struct sfe_ipv6_connection_match *counter_cm;
+ 	u32 flags;
+@@ -1663,6 +1683,7 @@ static int sfe_ipv6_recv_tcp(struct sfe_
+ 	src_port = tcph->source;
+ 	dest_port = tcph->dest;
+ 	flags = tcp_flag_word(tcph);
++	dscp = ipv6_get_dsfield(ipv6_hdr(skb)) >> XT_DSCP_SHIFT;
+ 
+ 	spin_lock_bh(&si->lock);
+ 
+@@ -1717,6 +1738,19 @@ static int sfe_ipv6_recv_tcp(struct sfe_
+ 		return 0;
+ 	}
+ 
++	if (cm->connection->bridged && cm->ingress_dscp != dscp)
++	{
++		struct sfe_ipv6_connection *c = cm->connection;
++		sfe_ipv6_remove_connection(si, c);
++		si->exception_events[SFE_IPV6_EXCEPTION_EVENT_DSCP_UPDATE]++;
++		si->packets_not_forwarded++;
++		spin_unlock_bh(&si->lock);
++
++		DEBUG_TRACE("dscp update detected v6:%d -> %d\n", dscp, cm->dscp);
++		sfe_ipv6_flush_connection(si, c, SFE_SYNC_REASON_EVICT);
++		return 0;
++	}
++
+ #ifdef CONFIG_XFRM
+ 	/*
+ 	 * We can't accelerate the flow on this direction, just let it go
+@@ -2622,6 +2656,7 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	original_cm->match_src_vlan_tci = sic->src_vlan_tci;
+ 	original_cm->match_dest_vlan_proto = sic->dest_vlan_proto;
+ 	original_cm->match_dest_vlan_tci = sic->dest_vlan_tci;
++	original_cm->ingress_dscp = sic->ingress_src_dscp;
+ 
+ 	if (sic->bridged) {
+ 		memcpy(original_cm->xmit_src_mac, sic->src_mac, ETH_ALEN);
+@@ -2697,6 +2732,7 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	reply_cm->match_src_vlan_tci = sic->dest_vlan_tci;
+ 	reply_cm->match_dest_vlan_proto = sic->src_vlan_proto;
+ 	reply_cm->match_dest_vlan_tci = sic->src_vlan_tci;
++	reply_cm->ingress_dscp = sic->ingress_dest_dscp;
+ 
+ 	if (sic->bridged) {
+ 		memcpy(reply_cm->xmit_src_mac, sic->dest_mac_xlate, ETH_ALEN);
+@@ -2949,7 +2985,7 @@ another_round:
+ 	}
+ 
+ 	if (flushed) {
+-		printk("%s: flushed %d flows for due to timeout\n", __func__, flushed);
++		DEBUG_TRACE("%s: flushed %d flows for due to timeout\n", __func__, flushed);
+ 	}
+ }
+ 
+@@ -3000,7 +3036,7 @@ another_round:
+ 	}
+ 
+ 	if (flushed) {
+-		printk("%s: flushed %d flows for dev=%s\n", __func__, flushed, dev ? dev->name : "all");
++		DEBUG_TRACE("%s: flushed %d flows for dev=%s\n", __func__, flushed, dev ? dev->name : "all");
+ 	}
+ }
+ 
+@@ -3051,7 +3087,7 @@ another_round:
+ 	}
+ 
+ 	if (flushed) {
+-		printk("%s: flushed %d flows for mac=%pM\n", __func__, flushed, mac_addr);
++		DEBUG_TRACE("%s: flushed %d flows for mac=%pM\n", __func__, flushed, mac_addr);
+ 	}
+ }
+ 

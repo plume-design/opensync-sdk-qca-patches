@@ -1,0 +1,16 @@
+Silence "Deny accelerating the return flow" log messages since they are
+being spammed a lot in network load testing. In worst case that was found
+we saw 2k log messages in one second, which can defenetily affect datapath
+performace.
+
+--- a/examples/ecm_ovs.c
++++ b/examples/ecm_ovs.c
+@@ -123,7 +123,7 @@ static ecm_classifier_ovs_result_t ecm_o
+ 
+ 		return_status = ovsmgr_flow_info_get(&return_flow, skb, &return_ofi);
+ 		if ((return_status == OVSMGR_FLOW_STATUS_DENY_ACCEL) || (return_status == OVSMGR_FLOW_STATUS_UNKNOWN)) {
+-			pr_info("%px: Deny accelerating the return flow\n", &return_flow);
++			// pr_info("%px: Deny accelerating the return flow\n", &return_flow);
+ 			goto process_flow;
+ 		}
+ 

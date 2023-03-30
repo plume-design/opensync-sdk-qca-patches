@@ -1,0 +1,73 @@
+--- a/frontends/nss/ecm_nss_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_ported_ipv4.c
+@@ -2202,15 +2202,6 @@ unsigned int ecm_nss_ported_ipv4_process
+ 				ECM_IP_ADDR_TO_DOT(ip_dest_addr_nat), dest_port, dest_port_nat, ecm_dir);
+ 	} else if (protocol == IPPROTO_UDP) {
+ 		/*
+-		 * Unconfirmed connection may be dropped by Linux at the final step,
+-		 * So we don't allow acceleration for the unconfirmed connections.
+-		 */
+-		if (likely(ct) && !nf_ct_is_confirmed(ct)) {
+-			DEBUG_WARN("%px: Unconfirmed UDP connection\n", ct);
+-			return NF_ACCEPT;
+-		}
+-
+-		/*
+ 		 * Extract UDP header to obtain port information
+ 		 */
+ 		udp_hdr = ecm_tracker_udp_check_header_and_read(skb, iph, &udp_hdr_buff);
+--- a/frontends/nss/ecm_nss_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_ported_ipv6.c
+@@ -2093,15 +2093,6 @@ unsigned int ecm_nss_ported_ipv6_process
+ 				ECM_IP_ADDR_TO_OCTAL(ip_src_addr), src_port, ECM_IP_ADDR_TO_OCTAL(ip_dest_addr), dest_port, ecm_dir);
+ 	} else if (protocol == IPPROTO_UDP) {
+ 		/*
+-		 * Unconfirmed connection may be dropped by Linux at the final step,
+-		 * So we don't allow acceleration for the unconfirmed connections.
+-		 */
+-		if (likely(ct) && !nf_ct_is_confirmed(ct)) {
+-			DEBUG_WARN("%px: Unconfirmed UDP connection\n", ct);
+-			return NF_ACCEPT;
+-		}
+-
+-		/*
+ 		 * Extract UDP header to obtain port information
+ 		 */
+ 		udp_hdr = ecm_tracker_udp_check_header_and_read(skb, iph, &udp_hdr_buff);
+--- a/frontends/sfe/ecm_sfe_ported_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv4.c
+@@ -1978,15 +1978,6 @@ unsigned int ecm_sfe_ported_ipv4_process
+ 				ECM_IP_ADDR_TO_DOT(ip_dest_addr_nat), dest_port, dest_port_nat, ecm_dir);
+ 	} else if (protocol == IPPROTO_UDP) {
+ 		/*
+-		 * Unconfirmed connection may be dropped by Linux at the final step,
+-		 * So we don't allow acceleration for the unconfirmed connections.
+-		 */
+-		if (likely(ct) && !nf_ct_is_confirmed(ct)) {
+-			DEBUG_WARN("%px: Unconfirmed UDP connection\n", ct);
+-			return NF_ACCEPT;
+-		}
+-
+-		/*
+ 		 * Extract UDP header to obtain port information
+ 		 */
+ 		udp_hdr = ecm_tracker_udp_check_header_and_read(skb, iph, &udp_hdr_buff);
+--- a/frontends/sfe/ecm_sfe_ported_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv6.c
+@@ -1898,16 +1898,6 @@ unsigned int ecm_sfe_ported_ipv6_process
+ 				ECM_IP_ADDR_TO_OCTAL(ip_src_addr), src_port, ECM_IP_ADDR_TO_OCTAL(ip_dest_addr), dest_port, ecm_dir);
+ 	} else if (protocol == IPPROTO_UDP) {
+ 		/*
+-		 * Unconfirmed connection may be dropped by Linux at the final step,
+-		 * So we don't allow acceleration for the unconfirmed connections.
+-		 */
+-		if (likely(ct) && !nf_ct_is_confirmed(ct)) {
+-			DEBUG_WARN("%px: Unconfirmed UDP connection\n", ct);
+-			return NF_ACCEPT;
+-		}
+-
+-
+-		/*
+ 		 * Extract UDP header to obtain port information
+ 		 */
+ 		udp_hdr = ecm_tracker_udp_check_header_and_read(skb, iph, &udp_hdr_buff);

@@ -1,0 +1,228 @@
+--- a/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.c
++++ b/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.c
+@@ -410,6 +410,15 @@ void ovs_dp_process_packet(struct sk_buf
+ 
+ 	ovs_flow_stats_update(flow, key->tp.flags, skb);
+ 	sf_acts = rcu_dereference(flow->sf_acts);
++	/* Update OVS flow keys */
++	if (likely(skb->ovs_first_ufid_len == 0)) {
++		skb->ovs_first_ufid_len = flow->id.ufid_len;
++		memcpy(skb->ovs_first_ufid, flow->id.ufid, flow->id.ufid_len);
++	} else if (skb->ovs_second_ufid_len == 0) {
++		skb->ovs_second_ufid_len = flow->id.ufid_len;
++		memcpy(skb->ovs_second_ufid, flow->id.ufid, flow->id.ufid_len);
++	}
++	/* Call OVS MGR callback */
+ 	ovs_dp_pkt_process_notify(dp, skb, key, flow, sf_acts);
+ 	ovs_execute_actions(dp, skb, sf_acts, key);
+ 
+@@ -2468,102 +2477,33 @@ struct sw_flow *ovs_accel_flow_find(void
+ }
+ EXPORT_SYMBOL(ovs_accel_flow_find);
+ 
+-/* Find datapath flow rule using MAC addresses*/
+-struct sw_flow *ovs_accel_flow_find_by_mac(void *dp_inst,
+-						struct net_device *indev,
+-						struct net_device *outdev,
+-						uint8_t *smac, uint8_t *dmac, uint16_t type)
++/* Find datapath flow rule using given flow ufid */
++struct sw_flow *ovs_accel_flow_find_ufid(void *dp_inst, struct sk_buff *skb,
++					 bool is_recirc)
+ {
+ 	struct datapath *dp = dp_inst;
+-	struct table_instance *ti;
+-	struct sw_flow *flow = NULL;
+-	struct sw_flow_actions *sf_acts;
+-	const struct nlattr *a;
+-	struct vport *vport;
+-	bool flow_found = false;
+-	int rem;
+-	int i;
+-
+-	rcu_read_lock();
+-	ti = rcu_dereference(dp->table.ti);
+-
+-	for (i = 0; i < ti->n_buckets; i++) {
+-		struct hlist_head *head = flex_array_get(ti->buckets, i);
+-		struct hlist_node *n;
+-
+-		if (unlikely(!head))
+-			continue;
+-
+-		hlist_for_each_entry_safe(flow, n, head,
+-				flow_table.node[ti->node_ver]) {
+-			if ((flow->key.eth.type == type) &&
+-			     ether_addr_equal(flow->key.eth.src, smac) &&
+-			     ether_addr_equal(flow->key.eth.dst, dmac)) {
+-				flow_found = true;
+-				goto found;
+-			}
+-		}
+-	}
+-found:
+-	if (!flow_found) {
+-		rcu_read_unlock();
+-		return NULL;
+-	}
+-
+-	/*
+-	 * Flow is found, check if ingress port matches indev.
+-	 */
+-	if (!indev) {
+-		goto check_outdev;
+-	}
+-
+-	vport = ovs_vport_ovsl_rcu(dp, flow->key.phy.in_port);
+-	if (!vport || (indev != vport->dev)) {
+-		rcu_read_unlock();
+-		return NULL;
+-	}
+-
+-check_outdev:
+-	/*
+-	 * if outdev is NULL, then the API is called
+-	 * to find the flow only.
+-	 */
+-	if (!outdev) {
+-		rcu_read_unlock();
+-		return flow;
+-	}
+-
+-	/*
+-	 * Flow is found, check if output action is outdev
+-	 */
+-	flow_found = false;
+-	sf_acts = rcu_dereference(flow->sf_acts);
+-	for (a = sf_acts->actions, rem = sf_acts->actions_len; rem > 0;
+-			a = nla_next(a, &rem)) {
+-		int port_no;
+-
+-		if (nla_type(a) != OVS_ACTION_ATTR_OUTPUT)
+-			continue;
+-
+-		port_no = nla_get_u32(a);
+-		vport = ovs_vport_ovsl_rcu(dp, port_no);
++	struct sw_flow_id id;
++	struct sw_flow *flow;
+ 
+-		if (vport && (outdev == vport->dev)) {
+-			flow_found = true;
+-		}
++	if (is_recirc) {
++		id.ufid_len = skb->ovs_second_ufid_len;
++		memcpy(id.ufid, skb->ovs_second_ufid, id.ufid_len);
++	} else {
++		id.ufid_len = skb->ovs_first_ufid_len;
++		memcpy(id.ufid, skb->ovs_first_ufid, id.ufid_len);
+ 	}
+ 
+-	if (!flow_found)
+-		flow = NULL;
+-
++	rcu_read_lock();
++	flow = ovs_flow_tbl_lookup_ufid(&dp->table, &id);
+ 	rcu_read_unlock();
++
+ 	return flow;
+ }
+-EXPORT_SYMBOL(ovs_accel_flow_find_by_mac);
++EXPORT_SYMBOL(ovs_accel_flow_find_ufid);
+ 
+ /* Update flow rule statistics */
+-int ovs_accel_flow_stats_update(void *dp_inst, void *out_vport,
+-				 struct sw_flow_key *key, int pkts, int bytes)
++int ovs_accel_flow_stats_update(void *dp_inst, const struct sw_flow_id *ufid,
++				int pkts, int bytes)
+ {
+ 	struct datapath *dp = dp_inst;
+ 	struct flow_stats *stats;
+@@ -2574,7 +2514,15 @@ int ovs_accel_flow_stats_update(void *dp
+ 	u32 n_mask_hit;
+ 
+ 	rcu_read_lock();
+-	flow = ovs_flow_tbl_lookup_stats(&dp->table, key, &n_mask_hit);
++
++	/* Find flow using ufid */
++	flow = ovs_flow_tbl_lookup_ufid(&dp->table, ufid);
++	if (!flow) {
++		rcu_read_unlock();
++		return -EINVAL;
++	}
++
++	flow = ovs_flow_tbl_lookup_stats(&dp->table, &flow->key, &n_mask_hit);
+ 	if (!flow) {
+ 		rcu_read_unlock();
+ 		return -EINVAL;
+@@ -2637,48 +2585,6 @@ struct net_device *ovs_accel_dev_find(vo
+ }
+ EXPORT_SYMBOL(ovs_accel_dev_find);
+ 
+-/* Find egress interface using key and skb */
+-struct net_device *ovs_accel_egress_dev_find(void *dp_inst,
+-					     struct sw_flow_key *key,
+-					     struct sk_buff *skb)
+-{
+-	struct datapath *dp = dp_inst;
+-	struct sw_flow *flow;
+-	struct sw_flow_actions *sf_acts;
+-	struct net_device *dev;
+-	const struct nlattr *a;
+-	int rem;
+-
+-	rcu_read_lock();
+-	flow = ovs_accel_flow_find(dp_inst, key);
+-	if (unlikely(!flow))
+-		goto done;
+-
+-	sf_acts = rcu_dereference(flow->sf_acts);
+-	for (a = sf_acts->actions, rem = sf_acts->actions_len; rem > 0;
+-			     a = nla_next(a, &rem)) {
+-		struct vport *vport;
+-		int port_no;
+-
+-		switch (nla_type(a)) {
+-		case OVS_ACTION_ATTR_OUTPUT:
+-			port_no = nla_get_u32(a);
+-			vport = ovs_vport_ovsl_rcu(dp, port_no);
+-			if (!vport) {
+-				goto done;
+-			}
+-
+-			dev = vport->dev;
+-			rcu_read_unlock();
+-			return dev;
+-		}
+-	}
+-done:
+-	rcu_read_unlock();
+-	return NULL;
+-}
+-EXPORT_SYMBOL(ovs_accel_egress_dev_find);
+-
+ static int __init dp_init(void)
+ {
+ 	int err;
+--- a/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.h
++++ b/qsdk/qca/src/linux-4.4/net/openvswitch/datapath.h
+@@ -237,17 +237,12 @@ void action_fifos_exit(void);
+ 
+ int ovs_register_accelerator(struct ovs_accel_callback *oac);
+ void ovs_unregister_accelerator(struct ovs_accel_callback *oac);
+-int ovs_accel_flow_stats_update(void *dp, void *out_vport,
+-				struct sw_flow_key *sf, int pkts, int bytes);
++int ovs_accel_flow_stats_update(void *dp_inst, const struct sw_flow_id *ufid,
++				int pkts, int bytes);
+ struct sw_flow *ovs_accel_flow_find(void *dp, struct sw_flow_key *sfk);
++struct sw_flow *ovs_accel_flow_find_ufid(void *dp_inst, struct sk_buff *skb,
++					 bool is_recirc);
+ struct net_device *ovs_accel_dev_find(void *dp, int vport_no);
+-struct net_device *ovs_accel_egress_dev_find(void *dp_inst,
+-					     struct sw_flow_key *key,
+-					     struct sk_buff *skb);
+-struct sw_flow *ovs_accel_flow_find_by_mac(void *dp_inst,
+-						struct net_device *indev,
+-						struct net_device *outdev,
+-						uint8_t *smac, uint8_t *dmac, uint16_t type);
+ 
+ /* 'KEY' must not have any bits set outside of the 'MASK' */
+ #define OVS_MASKED(OLD, KEY, MASK) ((KEY) | ((OLD) & ~(MASK)))

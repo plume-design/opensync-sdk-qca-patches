@@ -1,0 +1,17 @@
+--- a/frontends/include/ecm_front_end_common.h
++++ b/frontends/include/ecm_front_end_common.h
+@@ -118,6 +118,14 @@ static inline bool ecm_front_end_acceler
+ 		return true;
+ 	}
+ 
++	if ((ct->mark == 0x01) || (ct->mark == 0x03)) {
++		/*
++		 * This is an opensync thing, where mark=1 indicates inspect and mark=3 should result in packet drop.
++		 * In any case any connection with mark=1 or mark=3 should not be accelerated.
++		 */
++		return true;
++	}
++
+ 	acct = nf_conn_acct_find(ct)->counter;
+ 	if (acct) {
+ 		long long packets = atomic64_read(&acct[CTINFO2DIR(ctinfo)].packets);

@@ -1,0 +1,14 @@
+--- a/qsdk/qca/src/linux-4.4/include/linux/skbuff.h
++++ b/qsdk/qca/src/linux-4.4/include/linux/skbuff.h
+@@ -702,6 +702,11 @@ struct sk_buff {
+ 	__u16			network_header;
+ 	__u16			mac_header;
+ 
++	__u32			ovs_first_ufid_len;
++	__u32			ovs_first_ufid[16 / 4];
++	__u32			ovs_second_ufid_len;
++	__u32			ovs_second_ufid[16 / 4];
++
+ 	/* private: */
+ 	__u32			headers_end[0];
+ 	/* public: */

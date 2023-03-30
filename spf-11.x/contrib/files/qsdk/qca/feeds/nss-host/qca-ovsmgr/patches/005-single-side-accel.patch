@@ -1,0 +1,1157 @@
+--- a/exports/ovsmgr.h
++++ b/exports/ovsmgr.h
+@@ -54,11 +54,9 @@
+ enum ovsmgr_flow_status {
+ 	OVSMGR_FLOW_STATUS_ALLOW_ACCEL,		/* Allow the acceleration of the flow, no VLAN operation */
+ 	OVSMGR_FLOW_STATUS_DENY_ACCEL,		/* Deny the acceleration of the flow */
+-	OVSMGR_FLOW_STATUS_DENY_ACCEL_EGRESS,	/* outdev in flow is not allowed for acceleration */
+ 	OVSMGR_FLOW_STATUS_ALLOW_VLAN_ACCEL,	/* Allow the acceleration of the flow, single VLAN operation */
+ 	OVSMGR_FLOW_STATUS_ALLOW_VLAN_QINQ_ACCEL,
+ 						/* Allow the acceleration of the flow, QinQ VLAN operation */
+-	OVSMGR_FLOW_STATUS_UNKNOWN		/* Flow status is unknown */
+ };
+ 
+ /*
+@@ -112,6 +110,15 @@ struct ovsmgr_dp_tuple {
+ };
+ 
+ /*
++ * ovsmgr_flow_ufid
++ *  Datapath flow unique ID
++ */
++struct ovsmgr_flow_ufid {
++	uint32_t ufid_len;
++	uint32_t ufid[16 / 4];
++};
++
++/*
+  * ovsmgr_dp_flow
+  *	Datapath flow details
+  */
+@@ -123,6 +130,12 @@ struct ovsmgr_dp_flow {
+ 	struct vlan_hdr ingress_vlan;		/* Ingress VLAN header */
+ 	struct ovsmgr_dp_tuple tuple;		/* Flow tuple */
+ 	bool is_routed;				/* Routed flag, set when flow is routed */
++	bool is_post_ovs;			/* True when packet has already gone through associated OVS flow */
++	uint16_t ct_zone;			/* Conntrack zone */
++	uint32_t ct_mark;			/* Conntrack mark */
++	bool deny_skip_accel;			/* Deny flow find when skip_accel action is hit */
++	bool is_mcast;				/* True when doing multicast lookup */
++	struct ovsmgr_flow_ufid ufid;		/* Unique OVS flow ID */
+ };
+ 
+ /*
+@@ -143,9 +156,11 @@ struct ovsmgr_dp_flow_stats {
+  *	dscp contains DSCP to be marked for given flow key.
+  */
+ struct ovsmgr_flow_info {
+-	uint32_t dscp;			/* DSCP mark */
++	uint16_t in_port;		/* OVS input port num */
++	struct ovsmgr_flow_ufid ufid;	/* Unique OVS flow ID */
+ 	struct vlan_hdr ingress[2];	/* Ingress VLAN details */
+ 	struct vlan_hdr egress[2];	/* Egress VLAN details */
++	uint32_t dscp;			/* DSCP mark */
+ };
+ 
+ /*
+@@ -187,9 +202,8 @@ void ovsmgr_dp_hook_unregister(struct ov
+ void ovsmgr_bridge_interface_stats_update(struct net_device *dev,
+ 					  uint32_t rx_packets, uint32_t rx_bytes,
+ 					  uint32_t tx_packets, uint32_t tx_bytes);
+-void ovsmgr_flow_stats_update(struct ovsmgr_dp_flow *flow, struct ovsmgr_dp_flow_stats *stats);
+-struct net_device *ovsmgr_port_find(struct sk_buff *skb, struct net_device *dev, struct ovsmgr_dp_flow *flow);
+-struct net_device *ovsmgr_port_find_by_mac(struct sk_buff *skb, struct net_device *dev, struct ovsmgr_dp_flow *flow);
++void ovsmgr_flow_stats_update(uint16_t in_port, struct ovsmgr_flow_ufid *ufid,
++			      struct ovsmgr_dp_flow_stats *stats);
+ enum ovsmgr_flow_status ovsmgr_flow_info_get(struct ovsmgr_dp_flow *flow,
+ 					      struct sk_buff *skb, struct ovsmgr_flow_info *ofi);
+ struct net_device *ovsmgr_dev_get_master(struct net_device *dev);
+--- a/ovsmgr_dp.c
++++ b/ovsmgr_dp.c
+@@ -20,11 +20,15 @@
+ 
+ #include <asm/atomic.h>
+ #include <linux/etherdevice.h>
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_zones.h>
++#include <net/netfilter/nf_conntrack_core.h>
+ 
+ /*
+  * OpenVSwitch header files
+  */
+ #include <datapath.h>
++#include <conntrack.h>
+ #include "ovsmgr.h"
+ #include "ovsmgr_priv.h"
+ 
+@@ -158,62 +162,132 @@ static void ovsmgr_dp_send_ports_add_not
+  */
+ static void ovsmgr_dp_flow_key_dump(struct sw_flow_key *key)
+ {
+-	int i;
+-
+-	ovsmgr_trace("Phy:\n");
+-	ovsmgr_trace("\tpriority = %u\n", key->phy.priority);
+-	ovsmgr_trace("\tskb_mark = %u\n", key->phy.skb_mark);
+-	ovsmgr_trace("\tin_port = %u\n", key->phy.in_port);
+-
+-	ovsmgr_trace("Flow Hash = %u\n", key->ovs_flow_hash);
+-	ovsmgr_trace("Recirc_id = %u\n", key->recirc_id);
+-	ovsmgr_trace("Eth:\n");
+-	ovsmgr_trace("\tsmac = %pM\n", &key->eth.src);
+-	ovsmgr_trace("\tdmac = %pM\n", &key->eth.dst);
+-	ovsmgr_trace("\ttype = %x\n", key->eth.type);
+-
++	/*
++	 * Code is duplicated intentionally, since one single ovsmgr_info() call
++	 * always gets printed as one block to the kernel log.
++	 */
++	if (key->eth.type == htons(ETH_P_IP)) {
++		ovsmgr_info(
++			"Phy:\n"
++			"\tpriority = %u\n"
++			"\tskb_mark = %u\n"
++			"\tin_port = %u\n"
++			"Flow Hash = %u\n"
++			"Recirc_id = %u\n"
++			"Eth:\n"
++			"\tsmac = %pM\n"
++			"\tdmac = %pM\n"
++			"\ttype = %x\n"
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0))
+-	ovsmgr_trace("\tcvlan tci = %x\n", OVSMGR_KEY_CVLAN_TCI(key));
++			"\tcvlan tci = %x\n"
+ #endif
+-	ovsmgr_trace("\tvlan tci = %x\n", OVSMGR_KEY_VLAN_TCI(key));
+-
+-	ovsmgr_trace("IP:\n");
+-	ovsmgr_trace("\tproto = %d\n", key->ip.proto);
+-	ovsmgr_trace("\ttos = %d\n", key->ip.tos);
+-	ovsmgr_trace("\tttl = %d\n", key->ip.ttl);
+-
+-	ovsmgr_trace("\tfrag = %d\n", key->ip.frag);
+-
+-	ovsmgr_trace("TCP/UDP:\n");
+-	ovsmgr_trace("\tsrc = %x\n", key->tp.src);
+-	ovsmgr_trace("\tdst = %x\n", key->tp.dst);
+-	ovsmgr_trace("\tflags = %x\n", key->tp.flags);
+-
+-	if (key->eth.type == htons(ETH_P_IP)) {
+-		ovsmgr_trace("IPv4:\n");
+-		ovsmgr_trace("\tsrc ip = %pI4\n", &key->ipv4.addr.src);
+-		ovsmgr_trace("\tdst ip = %pI4\n", &key->ipv4.addr.dst);
++			"\tvlan tci = %x\n"
++			"IP:\n"
++			"\tproto = %d\n"
++			"\ttos = %d\n"
++			"\tttl = %d\n"
++			"\tfrag = %d\n"
++			"TCP/UDP:\n"
++			"\tsrc = %x\n"
++			"\tdst = %x\n"
++			"\tflags = %x\n"
++			"IPv6:\n"
++			"\tsrc ip = %pI4\n"
++			"\tdst ip = %pI4\n"
++			"CT:\n"
++			"\tzone = %x\n"
++			"\tstate = %x\n"
++			"\tmark = %x\n",
++			key->phy.priority,
++			key->phy.skb_mark,
++			key->phy.in_port,
++			key->ovs_flow_hash,
++			key->recirc_id,
++			&key->eth.src,
++			&key->eth.dst,
++			key->eth.type,
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0))
++			OVSMGR_KEY_CVLAN_TCI(key),
++#endif
++			OVSMGR_KEY_VLAN_TCI(key),
++			key->ip.proto,
++			key->ip.tos,
++			key->ip.ttl,
++			key->ip.frag,
++			key->tp.src,
++			key->tp.dst,
++			key->tp.flags,
++			&key->ipv4.addr.src,
++			&key->ipv4.addr.dst,
++#if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0))
++			key->ct.zone,
++			key->ct.state,
++#else
++			key->ct_zone,
++			key->ct_state,
++#endif
++			key->ct.mark);
+ 	} else if (key->eth.type == htons(ETH_P_IPV6)) {
+-		ovsmgr_trace("IPv6:\n");
+-		ovsmgr_trace("\tsrc ip = %pI6\n", &key->ipv6.addr.src);
+-		ovsmgr_trace("\tdst ip = %pI6\n", &key->ipv6.addr.dst);
+-	} else {
+-		ovsmgr_trace("Eth type = %x\n", key->eth.type);
+-	}
+-
+-	ovsmgr_trace("CT:\n");
++		ovsmgr_info(
++			"Phy:\n"
++			"\tpriority = %u\n"
++			"\tskb_mark = %u\n"
++			"\tin_port = %u\n"
++			"Flow Hash = %u\n"
++			"Recirc_id = %u\n"
++			"Eth:\n"
++			"\tsmac = %pM\n"
++			"\tdmac = %pM\n"
++			"\ttype = %x\n"
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0))
++			"\tcvlan tci = %x\n"
++#endif
++			"\tvlan tci = %x\n"
++			"IP:\n"
++			"\tproto = %d\n"
++			"\ttos = %d\n"
++			"\tttl = %d\n"
++			"\tfrag = %d\n"
++			"TCP/UDP:\n"
++			"\tsrc = %x\n"
++			"\tdst = %x\n"
++			"\tflags = %x\n"
++			"IPv4:\n"
++			"\tsrc ip = %pI6\n"
++			"\tdst ip = %pI6\n"
++			"CT:\n"
++			"\tzone = %x\n"
++			"\tstate = %x\n"
++			"\tmark = %x\n",
++			key->phy.priority,
++			key->phy.skb_mark,
++			key->phy.in_port,
++			key->ovs_flow_hash,
++			key->recirc_id,
++			&key->eth.src,
++			&key->eth.dst,
++			key->eth.type,
++#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 12, 0))
++			OVSMGR_KEY_CVLAN_TCI(key),
++#endif
++			OVSMGR_KEY_VLAN_TCI(key),
++			key->ip.proto,
++			key->ip.tos,
++			key->ip.ttl,
++			key->ip.frag,
++			key->tp.src,
++			key->tp.dst,
++			key->tp.flags,
++			&key->ipv6.addr.src,
++			&key->ipv6.addr.dst,
+ #if (LINUX_VERSION_CODE < KERNEL_VERSION(4, 12, 0))
+-	ovsmgr_trace("\tzone = %x\n", key->ct.zone);
+-	ovsmgr_trace("\tstate = %x\n", key->ct.state);
++			key->ct.zone,
++			key->ct.state,
+ #else
+-	ovsmgr_trace("\tzone = %x\n", key->ct_zone);
+-	ovsmgr_trace("\tstate = %x\n", key->ct_state);
++			key->ct_zone,
++			key->ct_state,
+ #endif
+-
+-	ovsmgr_trace("\tmark = %x\n", key->ct.mark);
+-	ovsmgr_trace("\tlabel: ");
+-	for (i = 0 ; i < OVS_CT_LABELS_LEN ; i++) {
+-		ovsmgr_trace("%x ", key->ct.labels.ct_labels[i]);
++			key->ct.mark);
+ 	}
+ }
+ 
+@@ -326,71 +400,6 @@ static void ovsmgr_dp_flow_dump(struct s
+ }
+ 
+ /*
+- * ovsmgr_dp_mcast_port_dev_find()
+- *	Find egress datapath port, given skb and datapath interface (dev)
+- */
+-static struct net_device *ovsmgr_dp_mcast_port_dev_find(struct ovsmgr_dp *nod,
+-							    struct ovsmgr_dp_port *master,
+-							    struct ovsmgr_dp_flow *flow, struct sk_buff *skb)
+-{
+-	struct ovsmgr_dp_port *p;
+-	struct sw_flow_key key;
+-	struct net_device *dev;
+-
+-	/*
+-	 * For multicast flow there is only one flow rule in datapath.  In case
+-	 * of multicast routing flow there is no flow from OVS bridge interface
+-	 * to bridge port.  The only way is to search for all the ports that are
+-	 * part of bridge.
+-	 *
+-	 * Create a originate flow key
+-	 */
+-	memset(&key, 0, sizeof(key));
+-	ether_addr_copy(key.eth.src, flow->smac);
+-	ether_addr_copy(key.eth.dst, flow->dmac);
+-
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0))
+-	key.mac_proto = MAC_PROTO_ETHERNET;
+-#endif
+-
+-	if (flow->tuple.ip_version == 4) {
+-		key.ipv4.addr.src = flow->tuple.ipv4.src;
+-		key.ipv4.addr.dst = flow->tuple.ipv4.dst;
+-		key.eth.type = htons(ETH_P_IP);
+-	} else {
+-		memcpy(&key.ipv6.addr.src, &flow->tuple.ipv6.src, sizeof(key.ipv6.addr.src));
+-		memcpy(&key.ipv6.addr.dst, &flow->tuple.ipv6.dst, sizeof(key.ipv6.addr.dst));
+-		key.eth.type = htons(ETH_P_IPV6);
+-	}
+-
+-	key.tp.src = flow->tuple.src_port;
+-	key.tp.dst = flow->tuple.dst_port;
+-	key.ip.proto = flow->tuple.protocol;
+-
+-	read_lock(&ovsmgr_ctx.lock);
+-	list_for_each_entry(p, &nod->port_list, node) {
+-		/*
+-		 * Skip search if the port is not part of same bridge
+-		 */
+-		if (p->master_dev != master->dev) {
+-			continue;
+-		}
+-
+-		key.phy.in_port = p->vport_num;
+-		dev = ovs_accel_egress_dev_find(nod->dp, &key, skb);
+-		if (dev) {
+-			read_unlock(&ovsmgr_ctx.lock);
+-			ovsmgr_info("%px: Found the egress interface for this flow, returning ingress port: %s\n",
+-					nod, p->dev->name);
+-			return p->dev;
+-		}
+-	}
+-
+-	read_unlock(&ovsmgr_ctx.lock);
+-	return NULL;
+-}
+-
+-/*
+  * ovsmgr_dp_is_ipv6_mask_nonzero()
+  *	Return true if ip_addr is non-zero
+  */
+@@ -914,6 +923,12 @@ static int ovsmgr_dp_flow_get(void *dp,
+ 		return -EINVAL;
+ 	}
+ 
++	flow->ufid.ufid_len = sf->id.ufid_len;
++	memcpy(flow->ufid.ufid, sf->id.ufid, sf->id.ufid_len);
++	ovsmgr_info("DELETE flow ufid (%d) %x %x %x %x\n", flow->ufid.ufid_len,
++		flow->ufid.ufid[0], flow->ufid.ufid[1],
++		flow->ufid.ufid[2], flow->ufid.ufid[3]);
++
+ 	/*
+ 	 * copy ingress VLAN
+ 	 */
+@@ -1506,75 +1521,92 @@ static struct ovs_accel_callback ovs_cb
+ 
+ /*
+  * ovsmgr_dp_flow_key_fill()
+- *	Fill key from flow and in_port
++ *	Fill key from flow and skb
+  */
+-static void ovsmgr_dp_flow_key_fill(struct ovsmgr_dp_flow *flow, int in_port, struct sw_flow_key *key)
++static void ovsmgr_dp_flow_key_fill(struct ovsmgr_dp_flow *flow, struct sk_buff *skb,
++				    struct sw_flow_key *key)
+ {
+ 	memset(key, 0, sizeof(*key));
+ 
+-	key->phy.in_port = in_port;
++	/* L2 info */
+ 	ether_addr_copy(key->eth.src, flow->smac);
+ 	ether_addr_copy(key->eth.dst, flow->dmac);
++	key->eth.type = (flow->tuple.ip_version == 4) ? htons(ETH_P_IP) : htons(ETH_P_IPV6);
+ 
+ #if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 10, 0))
+ 	key->mac_proto = MAC_PROTO_ETHERNET;
+ #endif
+ 
+-	if (flow->ingress_vlan.h_vlan_TCI) {
+-		OVSMGR_KEY_VLAN_TCI(key) = htons(flow->ingress_vlan.h_vlan_TCI | VLAN_TAG_PRESENT);
+-	}
++	key->phy.priority = skb->priority;
++	key->phy.skb_mark = skb->mark;
+ 
+-	if (flow->tuple.ip_version == 4) {
+-		key->ipv4.addr.src = flow->tuple.ipv4.src;
+-		key->ipv4.addr.dst = flow->tuple.ipv4.dst;
+-		key->eth.type = htons(ETH_P_IP);
+-	} else {
+-		memcpy(&key->ipv6.addr.src, &flow->tuple.ipv6.src, sizeof(key->ipv6.addr.src));
+-		memcpy(&key->ipv6.addr.dst, &flow->tuple.ipv6.dst, sizeof(key->ipv6.addr.dst));
+-		key->eth.type = htons(ETH_P_IPV6);
++	/* Only WAN->LAN routed flows have conntrack info populated before bridging */
++	if (flow->is_routed && flow->is_post_ovs == false) {
++		key->ct.state = 0x20;
++		key->ct.zone = flow->ct_zone;
++		key->ct.mark = flow->ct_mark;
+ 	}
+ 
+-	key->tp.src = flow->tuple.src_port;
+-	key->tp.dst = flow->tuple.dst_port;
+-	key->ip.proto = flow->tuple.protocol;
+-
+-	ovsmgr_dp_flow_key_dump(key);
+-}
++	/* Network layer */
++	if (flow->tuple.ip_version == 4) {
++		struct iphdr *nh = ip_hdr(skb);
+ 
+-/*
+- * ovsmgr_dp_flow_info_get_by_mac()
+- *	Find OVS flow rule from MAC address and update VLAN information
+- */
+-enum ovsmgr_flow_status ovsmgr_dp_flow_info_get_by_mac(void *dp, struct net_device *indev, struct net_device *outdev,
+-							u8 *src, u8 *dst, __be16 type, struct ovsmgr_flow_info *ofi)
+-{
+-	struct sw_flow_key *sfk;
+-	struct sw_flow *sf;
++		key->ipv4.addr.src = nh->saddr;
++		key->ipv4.addr.dst = nh->daddr;
++		key->ip.proto = nh->protocol;
++		key->ip.tos = nh->tos;
++		key->ip.ttl = nh->ttl;
++	} else {
++		struct ipv6hdr *nh = ipv6_hdr(skb);
+ 
+-	sf = ovs_accel_flow_find_by_mac(dp, indev, outdev, src, dst, type);
+-	if (!sf) {
+-		ovsmgr_warn("%px: Couldn't find flow rule using indev:%s, outdev:%s, SMAC:%pM, DMAC:%pM type:0x%x\n",
+-				dp, indev ? indev->name:"NULL", outdev ? outdev->name:"NULL", src, dst, type);
+-		return OVSMGR_FLOW_STATUS_DENY_ACCEL;
++		key->ipv6.addr.src = nh->saddr;
++		key->ipv6.addr.dst = nh->daddr;
++		key->ip.proto = nh->nexthdr;;
++		key->ip.tos = ipv6_get_dsfield(nh);
++		key->ip.ttl = nh->hop_limit;
++		key->ipv6.label = *(__be32 *)nh & htonl(IPV6_FLOWINFO_FLOWLABEL);
++	}
++
++	/* Transport layer */
++	if (key->ip.proto == IPPROTO_TCP) {
++		struct tcphdr *tcp = tcp_hdr(skb);
++		key->tp.src = tcp->source;
++		key->tp.dst = tcp->dest;
++	} else if (key->ip.proto == IPPROTO_UDP) {
++		struct udphdr *udp = udp_hdr(skb);
++		key->tp.src = udp->source;
++		key->tp.dst = udp->dest;
+ 	}
++}
+ 
+-	/*
+-	 * Flow is found and flow key has ingress packet details.
+-	 * If the flow rule is expecting VLAN header then it is expected
+-	 * that from indev packet should be transmitted with VLAN header.
+-	 * Copy ingress VLAN header to egress VLAN in VLAN info.
+-	 */
+-	sfk = &sf->key;
+-	if (OVSMGR_KEY_VLAN_TCI(sfk)) {
+-		ofi->egress[0].h_vlan_TCI = ntohs(OVSMGR_KEY_VLAN_TCI(sfk)) & ~VLAN_TAG_PRESENT;
+-		ofi->egress[0].h_vlan_encapsulated_proto = ETH_P_8021Q;
+-		ovsmgr_info("Egress VLAN : id = %x:%x\n",
+-				ofi->egress[0].h_vlan_encapsulated_proto,
+-				ofi->egress[0].h_vlan_TCI);
+-		return OVSMGR_FLOW_STATUS_ALLOW_VLAN_ACCEL;
+-	}
++/* Look up CT entry using SKB headers */
++static int ovsmgr_dp_conntrack_lookup_mark(uint16_t zone_id, struct sk_buff *skb, uint8_t ip_version, uint32_t *mark)
++{
++	uint16_t proto = (ip_version == 4) ? NFPROTO_IPV4 : NFPROTO_IPV6;
++	struct nf_conntrack_zone nf_request_zone;
++	struct nf_conntrack_tuple tuple = {};
++    struct nf_conntrack_tuple_hash *tuple_hash;
++	struct nf_conn *ct_entry;
++
++	/* Extract SKB data into tuple */
++	if (unlikely(!nf_ct_get_tuplepr(skb, skb_network_offset(skb), proto, &init_net, &tuple))) {
++		ovsmgr_warn("Unable to extract conntrack tuple\n");
++		return -1;
++	}
++	nf_ct_zone_init(&nf_request_zone, zone_id, NF_CT_DEFAULT_ZONE_DIR, 0);
++
++	/* Look up conntrack hash using tuple and zone */
++	tuple_hash = nf_conntrack_find_get(&init_net, (const struct nf_conntrack_zone *) &nf_request_zone, &tuple);
++	if (tuple_hash == NULL) {
++		ovsmgr_warn("Unable to find tuple hash\n");
++		return -1;
++	}
++
++	ct_entry = nf_ct_tuplehash_to_ctrack(tuple_hash);
++	*mark = ct_entry->mark;
++	nf_ct_put(ct_entry);
+ 
+-	return OVSMGR_FLOW_STATUS_ALLOW_ACCEL;
++	return 0;
+ }
+ 
+ /*
+@@ -1582,7 +1614,8 @@ enum ovsmgr_flow_status ovsmgr_dp_flow_i
+  *	Fill key from flow and in_port
+  */
+ enum ovsmgr_flow_status ovsmgr_dp_flow_info_get(struct ovsmgr_dp_flow *flow,
+-						     struct sk_buff *skb, struct ovsmgr_flow_info *ofi)
++						struct sk_buff *skb,
++						struct ovsmgr_flow_info *ofi)
+ {
+ 	struct ovsmgr_dp_port *in_port, *out_port;
+ 	struct sw_flow_actions *acts;
+@@ -1590,119 +1623,100 @@ enum ovsmgr_flow_status ovsmgr_dp_flow_i
+ 	struct ovsmgr_dp *nod;
+ 	const struct nlattr *a;
+ 	struct sw_flow *sf;
+-	enum ovsmgr_flow_status status = OVSMGR_FLOW_STATUS_DENY_ACCEL;
+-	bool found_egress = false;
+-	int in_port_num, out_port_num;
++	int in_port_num = 0, out_port_num = 0;
+ 	int vlan_index = 0;
+ 	int rem;
+-	uint64_t prev_action = OVS_ACTION_ATTR_UNSPEC;
+-	bool pop_vlan = false;
+-
+-	read_lock_bh(&ovsmgr_ctx.lock);
++	int output_count;
++	bool is_recirc = false;
+ 
+-	nod = ovsmgr_dp_find_by_dev(flow->indev);
+-	if (unlikely(!nod)) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: Couldn't find datapath instance for dev = %s\n", flow, flow->indev->name);
++	if ((flow->is_post_ovs ? flow->outdev : flow->indev) == NULL) {
+ 		return OVSMGR_FLOW_STATUS_DENY_ACCEL;
+ 	}
+ 
+-	in_port = ovsmgr_dp_port_find_by_dev(nod, flow->indev);
+-	if (!in_port) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: input datapath port instance is not found for dev = %s\n",
+-				nod, flow->indev->name);
+-		return OVSMGR_FLOW_STATUS_DENY_ACCEL;
+-	}
++	/* Find input and output port numbers */
++	read_lock_bh(&ovsmgr_ctx.lock);
+ 
+-	out_port = ovsmgr_dp_port_find_by_dev(nod, flow->outdev);
+-	if (!out_port) {
++	nod = ovsmgr_dp_find_by_dev(flow->is_post_ovs ? flow->outdev : flow->indev);
++	if (unlikely(!nod)) {
+ 		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: output datapath port instance is not found for dev = %s\n",
+-				nod, flow->outdev->name);
++		ovsmgr_warn("%px: Couldn't find datapath instance for dev = %s\n", flow, (flow->is_post_ovs ? flow->outdev : flow->indev)->name);
+ 		return OVSMGR_FLOW_STATUS_DENY_ACCEL;
+ 	}
+ 
+-	in_port_num = in_port->vport_num;
+-	out_port_num = out_port->vport_num;
+-	read_unlock_bh(&ovsmgr_ctx.lock);
+-
+-	ovsmgr_dp_flow_key_fill(flow, in_port_num, &key);
+-
+ 	/*
+-	 * If ingress packet is VLAN tagged then copy VLAN ID
++	 * If this packet has already been through OVS, then we know the output interface
++	 * of the flow. Otherwise we know the input interface of the flow.
+ 	 */
+-	if (flow->ingress_vlan.h_vlan_TCI) {
+-		/*
+-		 * If ingress vlan is set then there is no need to update
+-		 * ofi->ingress, caller is already aware that there is
+-		 * ingress VLAN header.
+-		 * This case is valid for multicast flow when there is an
+-		 * egress list update.
+-		 * Fill TCI in key, OVS datapath expects VLAN_TAG_PRESENT
+-		 * to be set in TCI.
+-		 */
+-		OVSMGR_KEY_VLAN_TCI(&key) = htons(flow->ingress_vlan.h_vlan_TCI) | VLAN_TAG_PRESENT;
+-	} else if (skb && skb_vlan_tag_present(skb)) {
+-		/*
+-		 * Read VLAN tag from skb
+-		 * VLAN_TAG_PRESENT is set by kernel in skb, fill TCI in key.
+-		 */
+-		OVSMGR_KEY_VLAN_TCI(&key) = htons(skb->vlan_tci);
+-
+-#if (LINUX_VERSION_CODE >= KERNEL_VERSION(4, 5, 0))
+-		key.eth.vlan.tpid = htons(ETH_P_8021Q);
+-		OVSMGR_KEY_VLAN_TCI(&key) |= htons(VLAN_TAG_PRESENT);
+-#endif
++	if (flow->is_post_ovs || flow->is_mcast) {
++		out_port = ovsmgr_dp_port_find_by_dev(nod, flow->outdev);
++		if (!out_port) {
++			read_unlock_bh(&ovsmgr_ctx.lock);
++			ovsmgr_warn("%px: input datapath port instance is not found for dev = %s\n",
++					nod, flow->outdev->name);
++			return OVSMGR_FLOW_STATUS_DENY_ACCEL;
++		}
++		out_port_num = out_port->vport_num;
++	}
++	if (!flow->is_post_ovs) {
++		in_port = ovsmgr_dp_port_find_by_dev(nod, flow->indev);
++		if (!in_port) {
++			read_unlock_bh(&ovsmgr_ctx.lock);
++			ovsmgr_warn("%px: input datapath port instance is not found for dev = %s\n",
++					nod, flow->indev->name);
++			return OVSMGR_FLOW_STATUS_DENY_ACCEL;
++		}
++		in_port_num = in_port->vport_num;
++	}
+ 
+-		ofi->ingress[0].h_vlan_TCI = skb_vlan_tag_get(skb);
+-		ofi->ingress[0].h_vlan_encapsulated_proto = ntohs(skb->vlan_proto);
+-		ovsmgr_info("Ingress VLAN : id = %x:%x\n",
+-				ofi->ingress[0].h_vlan_encapsulated_proto,
+-				ofi->ingress[0].h_vlan_TCI);
++	read_unlock_bh(&ovsmgr_ctx.lock);
+ 
+-		status = OVSMGR_FLOW_STATUS_ALLOW_VLAN_ACCEL;
+-	}
++	/* Extract flow key */
++	ovsmgr_dp_flow_key_fill(flow, skb, &key);
++	key.phy.in_port = in_port_num;
++	ovsmgr_info("extracted flow key (%p): [%d]\n", skb, flow->is_post_ovs);
++	ovsmgr_dp_flow_key_dump(&key);
+ 
+ 	/*
+ 	 * Find datapath rule with key.
+-	 * If rule is not found and it is a routed flow, then find rule using
+-	 * MAC addresses. For routed flows flow->indev is always OVS bridge interface.
+ 	 *
+ 	 * DSCP remarking action may not be configured.
+ 	 * Initialize DSCP value to invalid.
+ 	 */
+ 	ofi->dscp = OVSMGR_INVALID_DSCP;
+ 
+-	sf = ovs_accel_flow_find(nod->dp, &key);
+-	if (!sf) {
+-		if (!flow->is_routed) {
+-			ovsmgr_warn("%px:Couldn't find flow rule \n", flow);
+-			return OVSMGR_FLOW_STATUS_DENY_ACCEL;
+-		}
++look_up_flow:
++	if (flow->is_post_ovs == false) {
++		/* Do direct flow lookup */
++		sf = ovs_accel_flow_find(nod->dp, &key);
++	} else {
++		/* Use flow ufid for reverse flow lookup */
++		sf = ovs_accel_flow_find_ufid(nod->dp, skb, is_recirc);
++	}
+ 
+-		/*
+-		 * Multicast flows are always uni-directional, call
+-		 * ovsmgr_dp_flow_info_get_by_mac() API with populated
+-		 * source and destination mac address.
+-		 */
+-		if (is_multicast_ether_addr(flow->dmac)) {
+-			return ovsmgr_dp_flow_info_get_by_mac(nod->dp, flow->indev, flow->outdev,
+-					key.eth.src, key.eth.dst, key.eth.type, ofi);
+-		}
++	/* If we didn't find flow, we can't accelerate */
++	if (!sf) {
++		ovsmgr_info("OVS flow NOT found (%p): [%d]\n", skb, flow->is_post_ovs);
++		ovsmgr_dp_flow_key_dump(&key);
++		return OVSMGR_FLOW_STATUS_DENY_ACCEL;
++	}
+ 
+-		/*
+-		 * For unicast flows, we need to swap the source and dest mac address
+-		 * as we are querying for the reverse direction.
+-		 */
+-		return ovsmgr_dp_flow_info_get_by_mac(nod->dp, flow->outdev, flow->indev, key.eth.dst,
+-					key.eth.src, key.eth.type, ofi);
++	/* If the found flow has key with VLAN, copy it to our input/output info */
++	if (OVSMGR_KEY_VLAN_TCI(&sf->key) && is_recirc == false) {
++		ofi->ingress[0].h_vlan_TCI = ntohs(OVSMGR_KEY_VLAN_TCI(&sf->key)) & ~VLAN_TAG_PRESENT;
++		ofi->ingress[0].h_vlan_encapsulated_proto = ETH_P_8021Q;
++		ofi->egress[0].h_vlan_TCI = ntohs(OVSMGR_KEY_VLAN_TCI(&sf->key)) & ~VLAN_TAG_PRESENT;
++		ofi->egress[0].h_vlan_encapsulated_proto = ETH_P_8021Q;
++		vlan_index = 1;
++		ovsmgr_info("Found key with VLAN %x %x | %x %x\n",
++				ofi->egress[0].h_vlan_TCI, ofi->egress[0].h_vlan_encapsulated_proto,
++				ofi->egress[1].h_vlan_TCI, ofi->egress[1].h_vlan_encapsulated_proto);
+ 	}
+ 
+ 	/*
+ 	 * Flow is found, find if VLAN operations are needed and check
+ 	 * if egress port is allowed.
+ 	 */
++	output_count = 0;
+ 	rcu_read_lock();
+ 	acts = rcu_dereference(sf->sf_acts);
+ 
+@@ -1710,15 +1724,24 @@ enum ovsmgr_flow_status ovsmgr_dp_flow_i
+ 	     a = nla_next(a, &rem)) {
+ 		switch (nla_type(a)) {
+ 		case OVS_ACTION_ATTR_OUTPUT:
+-			if (out_port_num == nla_get_u32(a)) {
+-				ovsmgr_info("%px: Found egress port in flow rule: %d\n", flow, out_port_num);
+-				found_egress = true;
+-				if (status == OVSMGR_FLOW_STATUS_DENY_ACCEL)
+-					status = OVSMGR_FLOW_STATUS_ALLOW_ACCEL;
++			output_count++;
++
++			if (flow->is_mcast && out_port_num == nla_get_u32(a)) {
++				ovsmgr_warn("Found mcast output port %d\n", nla_get_u32(a));
++				goto done;
++			}
++
++			/* We already know output port for post OVS packets */
++			if (flow->is_post_ovs || output_count > 1) {
+ 				break;
+ 			}
+ 
+-			prev_action = OVS_ACTION_ATTR_OUTPUT;
++			out_port = ovsmgr_dp_port_find_by_num(nod, nla_get_u32(a));
++			if (!out_port) {
++				goto error;
++			}
++
++			flow->outdev = out_port->dev;
+ 			break;
+ 		case OVS_ACTION_ATTR_PUSH_VLAN: {
+ 			const struct ovs_action_push_vlan *vlan;
+@@ -1729,87 +1752,146 @@ enum ovsmgr_flow_status ovsmgr_dp_flow_i
+ 			ovsmgr_info("\tvlan_tci = %x\n", vlan->vlan_tci & ~VLAN_TAG_PRESENT);
+ 
+ 			/*
+-			 * Retain the VLAN information only for the below conditions,
+-			 * 1. PUSH_VLAN is the first action
+-			 * 2. Previous action was PUSH_VLAN
+-			 *
+-			 * Reset the VLAN information for all the other conditions.
+-			 */
+-			if ((prev_action != OVS_ACTION_ATTR_UNSPEC) &&
+-					(prev_action != OVS_ACTION_ATTR_PUSH_VLAN)) {
+-				vlan_index = 0;
+-				ofi->egress[0].h_vlan_TCI = 0;
+-				ofi->egress[0].h_vlan_encapsulated_proto = 0;
+-				ofi->egress[1].h_vlan_TCI = 0;
+-				ofi->egress[1].h_vlan_encapsulated_proto = 0;
+-			}
+-
+-			/*
+ 			 * Allow only two VLAN headers
+ 			 */
+-			if (vlan_index == 2) {
+-				ovsmgr_info("%px: More than 2 VLAN headers, don't accelerate\n", flow);
+-				rcu_read_unlock();
+-				return OVSMGR_FLOW_STATUS_DENY_ACCEL;
++			if (vlan_index > 0) {
++				ovsmgr_info("%px: More than one VLAN header not supported\n", flow);
++				ovsmgr_dp_flow_key_dump(&sf->key);
++				goto error;
+ 			}
+ 
+ 			ofi->egress[vlan_index].h_vlan_TCI = ntohs(vlan->vlan_tci) & ~VLAN_TAG_PRESENT;
+ 			ofi->egress[vlan_index].h_vlan_encapsulated_proto = ntohs(vlan->vlan_tpid);
+ 			vlan_index++;
+-			prev_action = OVS_ACTION_ATTR_PUSH_VLAN;
++
++			ovsmgr_info("Push VLAN action %x %x | %x %x\n",
++				ofi->egress[0].h_vlan_TCI, ofi->egress[0].h_vlan_encapsulated_proto,
++				ofi->egress[1].h_vlan_TCI, ofi->egress[1].h_vlan_encapsulated_proto);
+ 			break;
+ 		}
+ 		case OVS_ACTION_ATTR_POP_VLAN:
+-			pop_vlan = true;
+-			prev_action = OVS_ACTION_ATTR_POP_VLAN;
++			if (vlan_index < 1) {
++				ovsmgr_info("%px: No VLAN header to pop\n", flow);
++				ovsmgr_dp_flow_key_dump(&sf->key);
++				goto error;
++			}
++
++			vlan_index--;
++			ofi->egress[vlan_index].h_vlan_TCI = 0;
++			ofi->egress[vlan_index].h_vlan_encapsulated_proto = 0;
++
++			ovsmgr_info("Pop VLAN action %x %x | %x %x\n",
++				ofi->egress[0].h_vlan_TCI, ofi->egress[0].h_vlan_encapsulated_proto,
++				ofi->egress[1].h_vlan_TCI, ofi->egress[1].h_vlan_encapsulated_proto);
+ 			break;
+ 		case OVS_ACTION_ATTR_SET_MASKED:
+-			prev_action = OVS_ACTION_ATTR_SET_MASKED;
+ 			ofi->dscp = ovsmgr_dp_action_set_mask_get_dscp(&sf->key, nla_data(a));
+ 			ovsmgr_info("%px: DSCP = %x\n", sf, ofi->dscp);
+ 			break;
+ 		case OVS_ACTION_ATTR_SET_TO_MASKED: {
+-			prev_action = OVS_ACTION_ATTR_SET_TO_MASKED;
+ 			ofi->dscp = ovsmgr_dp_action_set_mask_get_dscp(&sf->key, nla_data(a));
+ 			ovsmgr_info("%px: DSCP = %x\n", sf, ofi->dscp);
+ 			break;
+ 		}
+-		}
++		case OVS_ACTION_ATTR_CT: {
++			const struct ovs_conntrack_info *ovs_ct_info;
+ 
+-		/*
+-		 * If the egress port is found then the job is done.
+-		 */
+-		if (found_egress) {
++			if (flow->is_post_ovs) {
++				break;
++			}
++
++			key.ct.state = 0x20;
++			key.ct.zone = flow->ct_zone;
++			key.ct.mark = flow->ct_mark;
++
++			/* ct() action might have zone attribute */
++			ovs_ct_info = nla_data(a);
++			if (ovs_ct_info && key.ct.zone != ovs_ct_info->zone.id) {
++				/*
++				 * Conntrack zone of CT entry from SKB differs from wanted
++				 * conntrack zone by ct() action. We need to look up CT entry
++				 * using packets headers from SKB.
++				 */
++				key.ct.zone = ovs_ct_info->zone.id;
++				ovsmgr_info("OVS ct() zone = %d\n", ovs_ct_info->zone.id);
++
++				if (ovsmgr_dp_conntrack_lookup_mark(ovs_ct_info->zone.id, skb, flow->tuple.ip_version, &key.ct.mark)) {
++					ovsmgr_warn("Unable to find CT mark for zone %d\n", key.ct.zone);
++					goto error;
++				}
++
++				ovsmgr_info("Found ct entry, mark is %d\n", key.ct.mark);
++			}
++			break;
++		}
++		case OVS_ACTION_ATTR_ACCEL:
++			/*
++			 * Unless we are building interface hierarchy, skip_accel action
++			 * means that acceleration should be DENIED
++			 */
++			if (flow->deny_skip_accel) {
++				goto error;
++			}
+ 			break;
++		case OVS_ACTION_ATTR_RECIRC:
++			is_recirc = true;
++			key.recirc_id = nla_get_u32(a);
++			rcu_read_unlock();
++			goto look_up_flow;
+ 		}
+ 	}
+-	rcu_read_unlock();
++
++	/* We cannot use flows without any output action */
++	if (output_count == 0) {
++		ovsmgr_info("No output action found for flow\n");
++		ovsmgr_dp_flow_key_dump(&sf->key);
++		goto error;
++	}
+ 
+ 	/*
+-	 * Do not accelerate if flow->outdev is not part of output list
++	 * When we are NOT constructing interface hierarchy or doing multicast,
++	 * only flows with exactly one output action are allowed
+ 	 */
+-	if (!found_egress) {
+-		return OVSMGR_FLOW_STATUS_DENY_ACCEL;
++	if (flow->deny_skip_accel && !flow->is_mcast && output_count > 1) {
++		ovsmgr_info("More than one output action detected, denying\n");
++		ovsmgr_dp_flow_key_dump(&sf->key);
++		goto error;
+ 	}
+ 
+-	switch (vlan_index) {
+-	case 1: /* return single VLAN operation. */
+-		return OVSMGR_FLOW_STATUS_ALLOW_VLAN_ACCEL;
+-	case 2: /* return QinQ VLAN operation. */
+-		return OVSMGR_FLOW_STATUS_ALLOW_VLAN_QINQ_ACCEL;
++done:
++	/* Parse input interface for post OVS packets from flow key */
++	if (flow->is_post_ovs) {
++		in_port = ovsmgr_dp_port_find_by_num(nod, sf->key.phy.in_port);
++		if (!in_port) {
++			ovsmgr_info("Port not found %d\n", sf->key.phy.in_port);
++			goto error;
++		}
++
++		flow->indev = in_port->dev;
+ 	}
+ 
+-	/*
+-	 * If there is no POP_VLAN action and
+-	 * it is a bridge flow, then the egress and ingress
+-	 * VLANs are same.
+-	 */
+-	if (!pop_vlan && !flow->is_routed) {
+-		ofi->egress[0].h_vlan_TCI = ofi->ingress[0].h_vlan_TCI;
+-		ofi->egress[0].h_vlan_encapsulated_proto = ofi->ingress[0].h_vlan_encapsulated_proto;
++	/* Found OVS flow, extract info from SKB */
++	ofi->in_port = sf->key.phy.in_port;
++
++	ovsmgr_info("Found OVS flow! (%p): [%d] %p\n", skb, flow->is_post_ovs, sf);
++	ovsmgr_dp_flow_key_dump(&sf->key);
++
++	ofi->ufid.ufid_len = sf->id.ufid_len;
++	memcpy(ofi->ufid.ufid, sf->id.ufid, sf->id.ufid_len);
++	ovsmgr_info("Flow ufid (%d) %x %x %x %x\n", ofi->ufid.ufid_len,
++		ofi->ufid.ufid[0], ofi->ufid.ufid[1],
++		ofi->ufid.ufid[2], ofi->ufid.ufid[3]);
++
++	rcu_read_unlock();
++
++	if (ofi->ingress[0].h_vlan_TCI || ofi->egress[0].h_vlan_TCI) {
++		return OVSMGR_FLOW_STATUS_ALLOW_VLAN_ACCEL;
+ 	}
++	return OVSMGR_FLOW_STATUS_ALLOW_ACCEL;
+ 
+-	return status;
++error:
++	rcu_read_unlock();
++	return OVSMGR_FLOW_STATUS_DENY_ACCEL;
+ }
+ 
+ /*
+@@ -1937,174 +2019,27 @@ void ovsmgr_dp_bridge_interface_stats_up
+  * ovsmgr_dp_flow_stats_update()
+  *	Update datapath flow statistics
+  */
+-void ovsmgr_dp_flow_stats_update(struct ovsmgr_dp_flow *flow, struct ovsmgr_dp_flow_stats *stats)
++void ovsmgr_dp_flow_stats_update(uint16_t in_port, struct ovsmgr_flow_ufid *ufid,
++				 struct ovsmgr_dp_flow_stats *stats)
+ {
+-	struct sw_flow_key key;
+-	struct ovsmgr_dp_port *in_port, *out_port;
+ 	struct ovsmgr_dp *nod;
+-	void *out_vport;
+-	int in_port_num;
++	struct sw_flow_id id;
+ 
+-	/*
+-	 * for bridge flows:
+-	 *	indev and outdev are OVS bridge ports.
+-	 * for route flows:
+-	 *	indev or outdev is OVS bridge port.
+-	 * TODO: Do we need to add route/bridge flag in flow?  This would
+-	 * help us to check if we need to find dp with outdev if indev fails
+-	 */
+ 	read_lock_bh(&ovsmgr_ctx.lock);
+-	nod = ovsmgr_dp_find_by_dev(flow->indev);
++	nod = ovsmgr_dp_find_by_port(in_port);
+ 	if (unlikely(!nod)) {
+ 		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: Couldn't find datapath instance for dev = %s\n", flow, flow->indev->name);
+-		return;
+-	}
+-
+-	in_port = ovsmgr_dp_port_find_by_dev(nod, flow->indev);
+-	if (!in_port) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: input datapath port instance is not found for dev = %s\n",
+-				nod, flow->indev->name);
+-		return;
+-	}
+-
+-	out_port = ovsmgr_dp_port_find_by_dev(nod, flow->outdev);
+-	if (!out_port) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: output datapath port instance is not found for dev = %s\n",
+-				nod, flow->outdev->name);
++		ovsmgr_warn("Couldn't find datapath instance for dev = %d\n", in_port);
+ 		return;
+ 	}
+-
+-	in_port_num = in_port->vport_num;
+-	out_vport = out_port->vport;
+-	read_unlock_bh(&ovsmgr_ctx.lock);
+-
+-	ovsmgr_dp_flow_key_fill(flow, in_port_num, &key);
+-	if (ovs_accel_flow_stats_update(nod->dp, out_vport, &key, stats->pkts, stats->bytes)) {
+-		ovsmgr_warn("%px: Couldnt update statistics\n", nod->dp);
+-	}
+-}
+-
+-/*
+- * ovsmgr_dp_port_dev_find_by_mac()
+- *	Find egress datapath port, given skb, datapath interface (dev) and flow
+- */
+-struct net_device *ovsmgr_dp_port_dev_find_by_mac(struct sk_buff *skb, struct net_device *dev,
+-							struct ovsmgr_dp_flow *flow)
+-{
+-	struct ovsmgr_dp *nod;
+-	struct ovsmgr_dp_port *nodp;
+-	struct sw_flow *sf;
+-	struct net_device *ovs_port;
+-	void *dp;
+-	uint16_t type;
+-
+-	read_lock_bh(&ovsmgr_ctx.lock);
+-	nod = ovsmgr_dp_find_by_dev(dev);
+-	if (!nod) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: Couldn't find datapath instance, dev = %s\n", skb, dev->name);
+-		return NULL;
+-	}
+-
+-	nodp = ovsmgr_dp_port_find_by_dev(nod, dev);
+-	if (!nodp) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: Couldn't find datapath port instance, dev = %s\n", skb, dev->name);
+-		return NULL;
+-	}
+-
+-	if (nodp->vport_type != OVS_VPORT_TYPE_INTERNAL) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: Interface type is not internal, dev = %s\n", skb, dev->name);
+-		return NULL;
+-	}
+-
+-	dp = nod->dp;
+-	read_unlock_bh(&ovsmgr_ctx.lock);
+-
+-	if (flow->tuple.ip_version == 4) {
+-		type = htons(ETH_P_IP);
+-	} else {
+-		type = htons(ETH_P_IPV6);
+-	}
+-
+-	sf = ovs_accel_flow_find_by_mac(dp, NULL, dev, flow->smac, flow->dmac, type);
+-	if (!sf) {
+-		ovsmgr_warn("%px: datapath flow is not found with SMAC: %pM, DMAC: %pM, dev = %s\n",
+-				skb, flow->smac, flow->dmac, dev->name);
+-		return NULL;
+-	}
+-
+-	/*
+-	 * Find the dev by ingress port number
+-	 */
+-	read_lock_bh(&ovsmgr_ctx.lock);
+-	nodp = ovsmgr_dp_port_find_by_num(nod, sf->key.phy.in_port);
+-	if (!nodp) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: DP port is not found, port number: %d, dev = %s\n", skb, sf->key.phy.in_port, dev->name);
+-		return NULL;
+-	}
+-
+-	ovs_port = nodp->dev;
+ 	read_unlock_bh(&ovsmgr_ctx.lock);
+ 
+-	return ovs_port;
+-}
+-
+-/*
+- * ovsmgr_dp_port_dev_find()
+- *	Find egress datapath port, given skb and datapath interface (dev)
+- */
+-struct net_device *ovsmgr_dp_port_dev_find(struct sk_buff *skb,
+-					       struct net_device *dev, struct ovsmgr_dp_flow *flow)
+-{
+-	struct ovsmgr_dp *nod;
+-	struct ovsmgr_dp_port *nodp;
+-	struct sw_flow_key key;
+-	void *dp;
+-	int vport_num;
+-
+-	read_lock_bh(&ovsmgr_ctx.lock);
+-	nod = ovsmgr_dp_find_by_dev(dev);
+-	if (!nod) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: Couldn't find datapath instance, dev = %s\n", skb, dev->name);
+-		return NULL;
+-	}
+-
+-	nodp = ovsmgr_dp_port_find_by_dev(nod, dev);
+-	if (!nodp) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: Couldn't find datapath port instance, dev = %s\n", skb, dev->name);
+-		return NULL;
+-	}
+-
+-	if (nodp->vport_type != OVS_VPORT_TYPE_INTERNAL) {
+-		read_unlock_bh(&ovsmgr_ctx.lock);
+-		ovsmgr_warn("%px: Interface type is not internal, dev = %s\n", skb, dev->name);
+-		return NULL;
+-	}
+-
+-	dp = nod->dp;
+-	vport_num = nodp->vport_num;
+-	read_unlock_bh(&ovsmgr_ctx.lock);
++	id.ufid_len = ufid->ufid_len;
++	memcpy(id.ufid, ufid->ufid, ufid->ufid_len);
+ 
+-	/*
+-	 * Multicast address requires finding the ingress interface through all
+-	 * bridge ports
+-	 */
+-	if (is_multicast_ether_addr(flow->dmac)) {
+-		return ovsmgr_dp_mcast_port_dev_find(nod, nodp, flow, skb);
++	if (ovs_accel_flow_stats_update(nod->dp, &id, stats->pkts, stats->bytes)) {
++		ovsmgr_warn("%px: Couldnt update statistics\n", nod->dp);
+ 	}
+-
+-	ether_addr_copy(flow->smac, dev->dev_addr);
+-	ovsmgr_dp_flow_key_fill(flow, vport_num, &key);
+-
+-	return ovs_accel_egress_dev_find(dp, &key, skb);
+ }
+ 
+ /*
+--- a/ovsmgr.c
++++ b/ovsmgr.c
+@@ -135,9 +135,10 @@ EXPORT_SYMBOL(ovsmgr_bridge_interface_st
+  * ovsmgr_flow_stats_update()
+  *	Update datapath flow statistics
+  */
+-void ovsmgr_flow_stats_update(struct ovsmgr_dp_flow *flow, struct ovsmgr_dp_flow_stats *stats)
++void ovsmgr_flow_stats_update(uint16_t in_port, struct ovsmgr_flow_ufid *ufid,
++			      struct ovsmgr_dp_flow_stats *stats)
+ {
+-	ovsmgr_dp_flow_stats_update(flow, stats);
++	ovsmgr_dp_flow_stats_update(in_port, ufid, stats);
+ }
+ EXPORT_SYMBOL(ovsmgr_flow_stats_update);
+ 
+@@ -172,26 +173,6 @@ bool ovsmgr_is_ovs_internal(struct net_d
+ EXPORT_SYMBOL(ovsmgr_is_ovs_internal);
+ 
+ /*
+- * ovsmgr_port_find()
+- *	Find datapath egress port for the given skb, bridge dev and flow
+- */
+-struct net_device *ovsmgr_port_find(struct sk_buff *skb, struct net_device *dev, struct ovsmgr_dp_flow *flow)
+-{
+-	return ovsmgr_dp_port_dev_find(skb, dev, flow);
+-}
+-EXPORT_SYMBOL(ovsmgr_port_find);
+-
+-/*
+- * ovsmgr_port_find_by_mac()
+- *	Find datapath egress port using MAC address
+- */
+-struct net_device *ovsmgr_port_find_by_mac(struct sk_buff *skb, struct net_device *dev, struct ovsmgr_dp_flow *flow)
+-{
+-	return ovsmgr_dp_port_dev_find_by_mac(skb, dev, flow);
+-}
+-EXPORT_SYMBOL(ovsmgr_port_find_by_mac);
+-
+-/*
+  * ovsmgr_flow_info_get()
+  *	Find datapath flow details using flow and skb
+  */
+--- a/ovsmgr_priv.h
++++ b/ovsmgr_priv.h
+@@ -150,11 +150,8 @@ int ovsmgr_notifiers_call(struct ovsmgr_
+ void ovsmgr_dp_bridge_interface_stats_update(struct net_device *dev,
+ 					  uint32_t rx_packets, uint32_t rx_bytes,
+ 					  uint32_t tx_packets, uint32_t tx_bytes);
+-void ovsmgr_dp_flow_stats_update(struct ovsmgr_dp_flow *flow, struct ovsmgr_dp_flow_stats *stats);
+-struct net_device *ovsmgr_dp_port_dev_find(struct sk_buff *skb,
+-					       struct net_device *dev, struct ovsmgr_dp_flow *flow);
+-struct net_device *ovsmgr_dp_port_dev_find_by_mac(struct sk_buff *skb, struct net_device *dev,
+-							struct ovsmgr_dp_flow *flow);
++void ovsmgr_dp_flow_stats_update(uint16_t in_port, struct ovsmgr_flow_ufid *ufid,
++				 struct ovsmgr_dp_flow_stats *stats);
+ struct net_device *ovsmgr_dp_dev_get_master(struct net_device *dev);
+ bool ovsmgr_dp_dev_is_master(struct net_device *dev);
+ bool ovsmgr_dp_dev_is_internal(struct net_device *dev);

@@ -1,0 +1,290 @@
+--- a/shortcut-fe/sfe_cm.h
++++ b/shortcut-fe/sfe_cm.h
+@@ -77,6 +77,10 @@ struct sfe_connection_create {
+ 	u32 src_dscp;
+ 	u32 dest_dscp;
+ 	bool bridged;
++	__be16 src_vlan_proto;
++	u16 src_vlan_tci;
++	__be16 dest_vlan_proto;
++	u16 dest_vlan_tci;
+ };
+ 
+ typedef enum sfe_ctmark_value {
+--- a/shortcut-fe/sfe_ipv4.c
++++ b/shortcut-fe/sfe_ipv4.c
+@@ -262,6 +262,14 @@ struct sfe_ipv4_connection_match {
+ 	 */
+ 	u64 rx_packet_count64;
+ 	u64 rx_byte_count64;
++
++	/*
++	 * Vlan info.
++	 */
++	__be16 match_src_vlan_proto;
++	u16 match_src_vlan_tci;
++	__be16 match_dest_vlan_proto;
++	u16 match_dest_vlan_tci;
+ };
+ 
+ /*
+@@ -298,6 +306,10 @@ struct sfe_ipv4_connection {
+ 	bool bridged;			/* connection is bridged or not */
+ 	u8 from_mac[ETH_ALEN];
+ 	u8 to_mac[ETH_ALEN];
++	__be16 src_vlan_proto;		/* Source VLAN protocol */
++	u16 src_vlan_tci;		/* Source VLAN tci (PCP, DEI, VID) */
++	__be16 dest_vlan_proto;		/* Destination VLAN protocol */
++	u16 dest_vlan_tci;		/* Destination VLAN tci (PCP, DEI, VID) */
+ };
+ 
+ /*
+@@ -1319,6 +1331,8 @@ static int sfe_ipv4_recv_udp(struct sfe_
+ 	/*
+ 	 * From this point on we're good to modify the packet.
+ 	 */
++	skb->vlan_tci = cm->match_dest_vlan_tci;
++	skb->vlan_proto = cm->match_dest_vlan_proto;
+ 
+ 	/*
+ 	 * Check if skb was cloned. If it was, unshare it. Because
+@@ -1908,6 +1922,8 @@ static int sfe_ipv4_recv_tcp(struct sfe_
+ 	/*
+ 	 * From this point on we're good to modify the packet.
+ 	 */
++	skb->vlan_tci = cm->match_dest_vlan_tci;
++	skb->vlan_proto = cm->match_dest_vlan_proto;
+ 
+ 	/*
+ 	 * Check if skb was cloned. If it was, unshare it. Because
+@@ -2615,6 +2631,10 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	original_cm->rx_byte_count64 = 0;
+ 	original_cm->xmit_dev = dest_dev;
+ 	original_cm->xmit_dev_mtu = sic->dest_mtu;
++	original_cm->match_src_vlan_proto = sic->src_vlan_proto;
++	original_cm->match_src_vlan_tci = sic->src_vlan_tci;
++	original_cm->match_dest_vlan_proto = sic->dest_vlan_proto;
++	original_cm->match_dest_vlan_tci = sic->dest_vlan_tci;
+ 
+ 	if (sic->bridged) {
+ 		memcpy(original_cm->xmit_src_mac, sic->src_mac, ETH_ALEN); 
+@@ -2687,6 +2707,10 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	reply_cm->rx_byte_count64 = 0;
+ 	reply_cm->xmit_dev = src_dev;
+ 	reply_cm->xmit_dev_mtu = sic->src_mtu;
++	reply_cm->match_src_vlan_proto = sic->dest_vlan_proto;
++	reply_cm->match_src_vlan_tci = sic->dest_vlan_tci;
++	reply_cm->match_dest_vlan_proto = sic->src_vlan_proto;
++	reply_cm->match_dest_vlan_tci = sic->src_vlan_tci;
+ 
+ 	if (sic->bridged) {
+ 		memcpy(reply_cm->xmit_src_mac, sic->dest_mac_xlate, ETH_ALEN);
+@@ -2769,6 +2793,10 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	memcpy(c->from_mac, sic->src_mac, ETH_ALEN);
+ 	memcpy(c->to_mac, sic->dest_mac_xlate, ETH_ALEN);
+ 	c->last_sync_jiffies = get_jiffies_64();
++	c->src_vlan_proto = sic->src_vlan_proto;
++	c->src_vlan_tci = sic->src_vlan_tci;
++	c->dest_vlan_proto = sic->dest_vlan_proto;
++	c->dest_vlan_tci = sic->dest_vlan_tci;
+ 
+ 	/*
+ 	 * Take hold of our source and dest devices for the duration of the connection.
+@@ -2806,12 +2834,12 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	 * We have everything we need!
+ 	 */
+ 	DEBUG_INFO("new connection - mark: %08x, p: %d\n"
+-		   "  s: %s:%pxM(%pxM):%pI4(%pI4):%u(%u)\n"
+-		   "  d: %s:%pxM(%pxM):%pI4(%pI4):%u(%u)\n",
++		   "  s: %s:vlan %x:%pxM(%pxM):%pI4(%pI4):%u(%u)\n"
++		   "  d: %s:vlan %x:%pxM(%pxM):%pI4(%pI4):%u(%u)\n",
+ 		   sic->mark, sic->protocol,
+-		   sic->src_dev->name, sic->src_mac, sic->src_mac_xlate,
++		   sic->src_dev->name, sic->src_vlan_tci, sic->src_mac, sic->src_mac_xlate,
+ 		   &sic->src_ip.ip, &sic->src_ip_xlate.ip, ntohs(sic->src_port), ntohs(sic->src_port_xlate),
+-		   dest_dev->name, sic->dest_mac, sic->dest_mac_xlate,
++		   dest_dev->name, sic->dest_vlan_tci, sic->dest_mac, sic->dest_mac_xlate,
+ 		   &sic->dest_ip.ip, &sic->dest_ip_xlate.ip, ntohs(sic->dest_port), ntohs(sic->dest_port_xlate));
+ 
+ 	return 0;
+@@ -3293,12 +3321,14 @@ static bool sfe_ipv4_debug_dev_read_conn
+ 				"bridged=\"%s\" "
+ 				"src_mac=\"%pM\" "
+ 				"src_dev=\"%s\" "
++				"src_vlan_proto=\"%x\" src_vlan_tci=\"%x\" "
+ 				"src_ip=\"%pI4\" src_ip_xlate=\"%pI4\" "
+ 				"src_port=\"%u\" src_port_xlate=\"%u\" "
+ 				"src_priority=\"%u\" src_dscp=\"%u\" "
+ 				"src_rx_pkts=\"%llu\" src_rx_bytes=\"%llu\" "
+ 				"dest_mac_xlate=\"%pM\" "
+ 				"dest_dev=\"%s\" "
++				"dest_vlan_proto=\"%x\" dest_vlan_tci=\"%x\" "
+ 				"dest_ip=\"%pI4\" dest_ip_xlate=\"%pI4\" "
+ 				"dest_port=\"%u\" dest_port_xlate=\"%u\" "
+ 				"dest_priority=\"%u\" dest_dscp=\"%u\" "
+@@ -3312,12 +3342,14 @@ static bool sfe_ipv4_debug_dev_read_conn
+ 				c->bridged ? "true" : "false",
+ 				c->from_mac,
+ 				src_dev->name,
++				c->src_vlan_proto, c->src_vlan_tci,
+ 				&src_ip, &src_ip_xlate,
+ 				ntohs(src_port), ntohs(src_port_xlate),
+ 				src_priority, src_dscp,
+ 				src_rx_packets, src_rx_bytes,
+ 				c->to_mac,
+ 				dest_dev->name,
++				c->dest_vlan_proto, c->dest_vlan_tci,
+ 				&dest_ip, &dest_ip_xlate,
+ 				ntohs(dest_port), ntohs(dest_port_xlate),
+ 				dest_priority, dest_dscp,
+--- a/simulated-driver/sfe_drv.c
++++ b/simulated-driver/sfe_drv.c
+@@ -627,6 +627,12 @@ sfe_tx_status_t sfe_drv_create_ipv4_rule
+ 	}
+ #endif
+ 
++	/* QinQ is NOT supported*/
++	sic.src_vlan_tci = msg->msg.rule_create.vlan_primary_rule.ingress_vlan_tag;
++	sic.src_vlan_proto = (sic.src_vlan_tci == 0) ? 0 : ntohs(ETH_P_8021Q);
++	sic.dest_vlan_tci = msg->msg.rule_create.vlan_primary_rule.egress_vlan_tag;
++	sic.dest_vlan_proto = (sic.dest_vlan_tci == 0) ? 0 : ntohs(ETH_P_8021Q);
++
+ 	if (!sfe_ipv4_create_rule(&sic)) {
+ 		/* success */
+ 		ret = SFE_CMN_RESPONSE_ACK;
+@@ -1024,6 +1030,12 @@ sfe_tx_status_t sfe_drv_create_ipv6_rule
+ 	}
+ #endif
+ 
++	/* QinQ is NOT supported*/
++	sic.src_vlan_tci = msg->msg.rule_create.vlan_primary_rule.ingress_vlan_tag;
++	sic.src_vlan_proto = (sic.src_vlan_tci == 0) ? 0 : ntohs(ETH_P_8021Q);
++	sic.dest_vlan_tci = msg->msg.rule_create.vlan_primary_rule.egress_vlan_tag;
++	sic.dest_vlan_proto = (sic.dest_vlan_tci == 0) ? 0 : ntohs(ETH_P_8021Q);
++
+ 	if (!sfe_ipv6_create_rule(&sic)) {
+ 		/* success */
+ 		ret = SFE_CMN_RESPONSE_ACK;
+--- a/shortcut-fe/sfe_ipv6.c
++++ b/shortcut-fe/sfe_ipv6.c
+@@ -286,6 +286,11 @@ struct sfe_ipv6_connection_match {
+ 	 */
+ 	u64 rx_packet_count64;
+ 	u64 rx_byte_count64;
++
++	__be16 match_src_vlan_proto;
++	u16 match_src_vlan_tci;
++	__be16 match_dest_vlan_proto;
++	u16 match_dest_vlan_tci;
+ };
+ 
+ /*
+@@ -322,6 +327,10 @@ struct sfe_ipv6_connection {
+ 	bool bridged;			/* connection is bridged or not */
+ 	u8 from_mac[ETH_ALEN];
+ 	u8 to_mac[ETH_ALEN];
++	__be16 src_vlan_proto;
++	u16 src_vlan_tci;
++	__be16 dest_vlan_proto;
++	u16 dest_vlan_tci;
+ };
+ 
+ /*
+@@ -1371,6 +1380,8 @@ static int sfe_ipv6_recv_udp(struct sfe_
+ 	/*
+ 	 * From this point on we're good to modify the packet.
+ 	 */
++	skb->vlan_tci = cm->match_dest_vlan_tci;
++	skb->vlan_proto = cm->match_dest_vlan_proto;
+ 
+ 	/*
+ 	 * Check if skb was cloned. If it was, unshare it. Because
+@@ -1927,6 +1938,8 @@ static int sfe_ipv6_recv_tcp(struct sfe_
+ 	/*
+ 	 * From this point on we're good to modify the packet.
+ 	 */
++	skb->vlan_tci = cm->match_dest_vlan_tci;
++	skb->vlan_proto = cm->match_dest_vlan_proto;
+ 
+ 	/*
+ 	 * Check if skb was cloned. If it was, unshare it. Because
+@@ -2604,6 +2617,10 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	original_cm->rx_byte_count64 = 0;
+ 	original_cm->xmit_dev = dest_dev;
+ 	original_cm->xmit_dev_mtu = sic->dest_mtu;
++	original_cm->match_src_vlan_proto = sic->src_vlan_proto;
++	original_cm->match_src_vlan_tci = sic->src_vlan_tci;
++	original_cm->match_dest_vlan_proto = sic->dest_vlan_proto;
++	original_cm->match_dest_vlan_tci = sic->dest_vlan_tci;
+ 
+ 	if (sic->bridged) {
+ 		memcpy(original_cm->xmit_src_mac, sic->src_mac, ETH_ALEN);
+@@ -2675,6 +2692,10 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	reply_cm->rx_byte_count64 = 0;
+ 	reply_cm->xmit_dev = src_dev;
+ 	reply_cm->xmit_dev_mtu = sic->src_mtu;
++	reply_cm->match_src_vlan_proto = sic->dest_vlan_proto;
++	reply_cm->match_src_vlan_tci = sic->dest_vlan_tci;
++	reply_cm->match_dest_vlan_proto = sic->src_vlan_proto;
++	reply_cm->match_dest_vlan_tci = sic->src_vlan_tci;
+ 
+ 	if (sic->bridged) {
+ 		memcpy(reply_cm->xmit_src_mac, sic->dest_mac_xlate, ETH_ALEN);
+@@ -2757,6 +2778,10 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	memcpy(c->from_mac, sic->src_mac, ETH_ALEN);
+ 	memcpy(c->to_mac, sic->dest_mac_xlate, ETH_ALEN);
+ 	c->last_sync_jiffies = get_jiffies_64();
++	c->src_vlan_proto = sic->src_vlan_proto;
++	c->src_vlan_tci = sic->src_vlan_tci;
++	c->dest_vlan_proto = sic->dest_vlan_proto;
++	c->dest_vlan_tci = sic->dest_vlan_tci;
+ 
+ 	/*
+ 	 * Take hold of our source and dest devices for the duration of the connection.
+@@ -2794,12 +2819,12 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	 * We have everything we need!
+ 	 */
+ 	DEBUG_INFO("new connection - mark: %08x, p: %d\n"
+-		   "  s: %s:%pxM(%pxM):%pI6(%pI6):%u(%u)\n"
+-		   "  d: %s:%pxM(%pxM):%pI6(%pI6):%u(%u)\n",
++		   "  s: %s:vlan %x:%pxM(%pxM):%pI6(%pI6):%u(%u)\n"
++		   "  d: %s:vlan %x:%pxM(%pxM):%pI6(%pI6):%u(%u)\n",
+ 		   sic->mark, sic->protocol,
+-		   sic->src_dev->name, sic->src_mac, sic->src_mac_xlate,
++		   sic->src_dev->name, sic->src_vlan_tci, sic->src_mac, sic->src_mac_xlate,
+ 		   sic->src_ip.ip6, sic->src_ip_xlate.ip6, ntohs(sic->src_port), ntohs(sic->src_port_xlate),
+-		   dest_dev->name, sic->dest_mac, sic->dest_mac_xlate,
++		   dest_dev->name, sic->dest_vlan_tci, sic->dest_mac, sic->dest_mac_xlate,
+ 		   sic->dest_ip.ip6, sic->dest_ip_xlate.ip6, ntohs(sic->dest_port), ntohs(sic->dest_port_xlate));
+ 
+ 	return 0;
+@@ -3273,12 +3298,14 @@ static bool sfe_ipv6_debug_dev_read_conn
+ 				"bridged=\"%s\" "
+ 				"src_mac=\"%pM\" "
+ 				"src_dev=\"%s\" "
++				"src_vlan_proto=\"%x\" src_vlan_tci=\"%x\" "
+ 				"src_ip=\"%pI6\" src_ip_xlate=\"%pI6\" "
+ 				"src_port=\"%u\" src_port_xlate=\"%u\" "
+ 				"src_priority=\"%u\" src_dscp=\"%u\" "
+ 				"src_rx_pkts=\"%llu\" src_rx_bytes=\"%llu\" "
+ 				"dest_mac_xlate=\"%pM\" "
+ 				"dest_dev=\"%s\" "
++				"dest_vlan_proto=\"%x\" dest_vlan_tci=\"%x\" "
+ 				"dest_ip=\"%pI6\" dest_ip_xlate=\"%pI6\" "
+ 				"dest_port=\"%u\" dest_port_xlate=\"%u\" "
+ 				"dest_priority=\"%u\" dest_dscp=\"%u\" "
+@@ -3292,12 +3319,14 @@ static bool sfe_ipv6_debug_dev_read_conn
+ 				c->bridged ? "true" : "false",
+ 				c->from_mac,
+ 				src_dev->name,
++				c->src_vlan_proto, c->src_vlan_tci,
+ 				&src_ip, &src_ip_xlate,
+ 				ntohs(src_port), ntohs(src_port_xlate),
+ 				src_priority, src_dscp,
+ 				src_rx_packets, src_rx_bytes,
+ 				c->to_mac,
+ 				dest_dev->name,
++				c->dest_vlan_proto, c->dest_vlan_tci,
+ 				&dest_ip, &dest_ip_xlate,
+ 				ntohs(dest_port), ntohs(dest_port_xlate),
+ 				dest_priority, dest_dscp,

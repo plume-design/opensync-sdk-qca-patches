@@ -1,0 +1,120 @@
+--- a/simulated-driver/sfe_drv.c
++++ b/simulated-driver/sfe_drv.c
+@@ -505,6 +505,7 @@ sfe_tx_status_t sfe_drv_create_ipv4_rule
+ 	enum sfe_cmn_response ret;
+ 	const unsigned char empty[ETH_ALEN] = { 0, };
+ 
++	memset(&sic, 0, sizeof(sic));
+ 	response = sfe_drv_alloc_response_msg(SFE_DRV_MSG_TYPE_IPV4, msg);
+ 	if (!response) {
+ 		sfe_drv_incr_exceptions(SFE_DRV_EXCEPTION_ENQUEUE_FAILED);
+@@ -621,11 +622,18 @@ sfe_tx_status_t sfe_drv_create_ipv4_rule
+ 	}
+ #endif
+ 
+-	/* QinQ is NOT supported*/
+-	sic.src_vlan_tci = msg->msg.rule_create.vlan_primary_rule.ingress_vlan_tag;
+-	sic.src_vlan_proto = (sic.src_vlan_tci == 0) ? 0 : ntohs(ETH_P_8021Q);
+-	sic.dest_vlan_tci = msg->msg.rule_create.vlan_primary_rule.egress_vlan_tag;
+-	sic.dest_vlan_proto = (sic.dest_vlan_tci == 0) ? 0 : ntohs(ETH_P_8021Q);
++	if ((msg->msg.rule_create.valid_flags & SFE_RULE_CREATE_VLAN_VALID) == SFE_RULE_CREATE_VLAN_VALID)
++	{
++		/* QinQ is NOT supported */
++		if (msg->msg.rule_create.vlan_primary_rule.ingress_vlan_tag != SFE_VLAN_ID_NOT_CONFIGURED) {
++			sic.src_vlan_tci = msg->msg.rule_create.vlan_primary_rule.ingress_vlan_tag | VLAN_TAG_PRESENT;
++			sic.src_vlan_proto = ntohs(ETH_P_8021Q);
++		}
++		if (msg->msg.rule_create.vlan_primary_rule.egress_vlan_tag != SFE_VLAN_ID_NOT_CONFIGURED) {
++			sic.dest_vlan_tci = msg->msg.rule_create.vlan_primary_rule.egress_vlan_tag | VLAN_TAG_PRESENT;
++			sic.dest_vlan_proto = ntohs(ETH_P_8021Q);
++		}
++	}
+ 
+ 	if (!sfe_ipv4_create_rule(&sic)) {
+ 		/* success */
+@@ -903,6 +911,7 @@ sfe_tx_status_t sfe_drv_create_ipv6_rule
+ 	enum sfe_cmn_response ret;
+ 	const unsigned char empty[ETH_ALEN] = { 0, };
+ 
++	memset(&sic, 0, sizeof(sic));
+ 	response = sfe_drv_alloc_response_msg(SFE_DRV_MSG_TYPE_IPV6, msg);
+ 	if (!response) {
+ 		sfe_drv_incr_exceptions(SFE_DRV_EXCEPTION_ENQUEUE_FAILED);
+@@ -1018,11 +1027,18 @@ sfe_tx_status_t sfe_drv_create_ipv6_rule
+ 	}
+ #endif
+ 
+-	/* QinQ is NOT supported*/
+-	sic.src_vlan_tci = msg->msg.rule_create.vlan_primary_rule.ingress_vlan_tag;
+-	sic.src_vlan_proto = (sic.src_vlan_tci == 0) ? 0 : ntohs(ETH_P_8021Q);
+-	sic.dest_vlan_tci = msg->msg.rule_create.vlan_primary_rule.egress_vlan_tag;
+-	sic.dest_vlan_proto = (sic.dest_vlan_tci == 0) ? 0 : ntohs(ETH_P_8021Q);
++	if ((msg->msg.rule_create.valid_flags & SFE_RULE_CREATE_VLAN_VALID) == SFE_RULE_CREATE_VLAN_VALID)
++	{
++		/* QinQ is NOT supported */
++		if (msg->msg.rule_create.vlan_primary_rule.ingress_vlan_tag != SFE_VLAN_ID_NOT_CONFIGURED) {
++			sic.src_vlan_tci = msg->msg.rule_create.vlan_primary_rule.ingress_vlan_tag | VLAN_TAG_PRESENT;
++			sic.src_vlan_proto = ntohs(ETH_P_8021Q);
++		}
++		if (msg->msg.rule_create.vlan_primary_rule.egress_vlan_tag != SFE_VLAN_ID_NOT_CONFIGURED) {
++			sic.dest_vlan_tci = msg->msg.rule_create.vlan_primary_rule.egress_vlan_tag | VLAN_TAG_PRESENT;
++			sic.dest_vlan_proto = ntohs(ETH_P_8021Q);
++		}
++	}
+ 
+ 	if (!sfe_ipv6_create_rule(&sic)) {
+ 		/* success */
+--- a/shortcut-fe/sfe_ipv4.c
++++ b/shortcut-fe/sfe_ipv4.c
+@@ -22,6 +22,7 @@
+ #include <net/tcp.h>
+ #include <linux/etherdevice.h>
+ #include <linux/version.h>
++#include <linux/if_vlan.h>
+ 
+ #include "sfe.h"
+ #include "sfe_cm.h"
+@@ -3342,14 +3343,14 @@ static bool sfe_ipv4_debug_dev_read_conn
+ 				c->bridged ? "true" : "false",
+ 				c->from_mac,
+ 				src_dev->name,
+-				c->src_vlan_proto, c->src_vlan_tci,
++				c->src_vlan_proto, (c->src_vlan_tci & ~VLAN_TAG_PRESENT),
+ 				&src_ip, &src_ip_xlate,
+ 				ntohs(src_port), ntohs(src_port_xlate),
+ 				src_priority, src_dscp,
+ 				src_rx_packets, src_rx_bytes,
+ 				c->to_mac,
+ 				dest_dev->name,
+-				c->dest_vlan_proto, c->dest_vlan_tci,
++				c->dest_vlan_proto, (c->dest_vlan_tci & ~VLAN_TAG_PRESENT),
+ 				&dest_ip, &dest_ip_xlate,
+ 				ntohs(dest_port), ntohs(dest_port_xlate),
+ 				dest_priority, dest_dscp,
+--- a/shortcut-fe/sfe_ipv6.c
++++ b/shortcut-fe/sfe_ipv6.c
+@@ -22,6 +22,7 @@
+ #include <net/tcp.h>
+ #include <linux/etherdevice.h>
+ #include <linux/version.h>
++#include <linux/if_vlan.h>
+ 
+ #include "sfe.h"
+ #include "sfe_cm.h"
+@@ -3319,14 +3320,14 @@ static bool sfe_ipv6_debug_dev_read_conn
+ 				c->bridged ? "true" : "false",
+ 				c->from_mac,
+ 				src_dev->name,
+-				c->src_vlan_proto, c->src_vlan_tci,
++				c->src_vlan_proto, (c->src_vlan_tci & ~VLAN_TAG_PRESENT),
+ 				&src_ip, &src_ip_xlate,
+ 				ntohs(src_port), ntohs(src_port_xlate),
+ 				src_priority, src_dscp,
+ 				src_rx_packets, src_rx_bytes,
+ 				c->to_mac,
+ 				dest_dev->name,
+-				c->dest_vlan_proto, c->dest_vlan_tci,
++				c->dest_vlan_proto, (c->dest_vlan_tci & ~VLAN_TAG_PRESENT),
+ 				&dest_ip, &dest_ip_xlate,
+ 				ntohs(dest_port), ntohs(dest_port_xlate),
+ 				dest_priority, dest_dscp,

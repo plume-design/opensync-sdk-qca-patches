@@ -1,0 +1,275 @@
+--- a/frontends/sfe/ecm_sfe_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ipv4.c
+@@ -92,6 +92,9 @@
+ #endif
+ #include "ecm_front_end_common.h"
+ #include "ecm_front_end_ipv4.h"
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++#include <ovsmgr.h>
++#endif
+ 
+ int ecm_sfe_ipv4_no_action_limit_default = 250;		/* Default no-action limit. */
+ int ecm_sfe_ipv4_driver_fail_limit_default = 250;		/* Default driver fail limit. */
+@@ -1226,6 +1229,16 @@ static unsigned int ecm_sfe_ipv4_post_ro
+ 		return NF_ACCEPT;
+ 	}
+ 
++	#ifndef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++	/*
++	 * skip OpenVSwitch flows because we don't accelerate them
++	 */
++	if (netif_is_ovs_master(out) || netif_is_ovs_master(in)) {
++		dev_put(in);
++		return NF_ACCEPT;
++	}
++	#endif
++
+ 	DEBUG_TRACE("Post routing process skb %px, out: %px (%s), in: %px (%s)\n", skb, out, out->name, in, in->name);
+ 	result = ecm_sfe_ipv4_ip_process((struct net_device *)out, in, NULL, NULL,
+ 							can_accel, true, false, skb);
+@@ -1647,6 +1660,87 @@ sync_conntrack:
+ 	nf_ct_put(ct);
+ }
+ 
++
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++/*
++ * ecm_sfe_ipv4_ovs_dp_process()
++ *      Process OVS IPv4 bridged packets.
++ */
++unsigned int ecm_sfe_ipv4_ovs_dp_process(struct sk_buff *skb, struct net_device *out)
++{
++	struct ethhdr *skb_eth_hdr;
++	bool can_accel = true;
++	struct net_device *in;
++
++	/*
++	 * If operations have stopped then do not process packets
++	 */
++	spin_lock_bh(&ecm_sfe_ipv4_lock);
++	if (unlikely(ecm_front_end_ipv4_stopped)) {
++		spin_unlock_bh(&ecm_sfe_ipv4_lock);
++		DEBUG_TRACE("Front end stopped\n");
++		return 1;
++	}
++	spin_unlock_bh(&ecm_sfe_ipv4_lock);
++
++	/*
++	 * Don't process broadcast.
++	 */
++	if (skb->pkt_type == PACKET_BROADCAST) {
++		DEBUG_TRACE("Broadcast, ignoring: %px\n", skb);
++		return 1;
++	}
++
++	if (skb->protocol != ntohs(ETH_P_IP)) {
++		DEBUG_WARN("%px: Wrong skb protocol: %d", skb, skb->protocol);
++		return 1;
++	}
++
++        skb_eth_hdr = eth_hdr(skb);
++        if (!skb_eth_hdr) {
++                DEBUG_WARN("%px: Not Eth\n", skb);
++                return 1;
++        }
++
++        in = dev_get_by_index(&init_net, skb->skb_iif);
++        if (!in) {
++                DEBUG_WARN("%px: No in device\n", skb);
++                return 1;
++        }
++
++        DEBUG_TRACE("%px: in: %s out: %s skb->protocol: %x\n", skb, in->name, out->name, skb->protocol);
++
++	if (netif_is_ovs_master(in)) {
++		if (!ecm_mac_addr_equal(skb_eth_hdr->h_dest, in->dev_addr)) {
++			DEBUG_TRACE("%px: in is bridge and mac address equals to packet dest, flow is routed, ignore \n", skb);
++			dev_put(in);
++			return 1;
++		}
++	}
++
++	if (netif_is_ovs_master(out)) {
++		if (!ecm_mac_addr_equal(skb_eth_hdr->h_source, out->dev_addr)) {
++			DEBUG_TRACE("%px: out is bridge and mac address equals to packet source, flow is routed, ignore \n", skb);
++			dev_put(in);
++			return 1;
++		}
++	}
++
++        ecm_sfe_ipv4_ip_process((struct net_device *)out, in,
++                                skb_eth_hdr->h_source, skb_eth_hdr->h_dest, can_accel, false, false, skb);
++
++        dev_put(in);
++
++        return 0;
++}
++
++static struct ovsmgr_dp_hook_ops ecm_sfe_ipv4_dp_hooks = {
++	.protocol = 4,
++	.hook_num = OVSMGR_DP_HOOK_POST_FLOW_PROC,
++	.hook = ecm_sfe_ipv4_ovs_dp_process,
++};
++#endif
++
+ /*
+  * struct nf_hook_ops ecm_sfe_ipv4_netfilter_hooks[]
+  *	Hooks into netfilter packet monitoring points.
+@@ -1924,6 +2018,10 @@ int ecm_sfe_ipv4_init(struct dentry *den
+ 		goto task_cleanup;
+ 	}
+ 
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++	ovsmgr_dp_hook_register(&ecm_sfe_ipv4_dp_hooks);
++#endif
++
+ #ifdef ECM_MULTICAST_ENABLE
+ 	ecm_sfe_multicast_ipv4_init();
+ #endif
+@@ -1970,6 +2068,10 @@ void ecm_sfe_ipv4_exit(void)
+ 		debugfs_remove_recursive(ecm_sfe_ipv4_dentry);
+ 	}
+ 
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++	ovsmgr_dp_hook_unregister(&ecm_sfe_ipv4_dp_hooks);
++#endif
++
+ #ifdef ECM_MULTICAST_ENABLE
+ 	ecm_sfe_multicast_ipv4_exit();
+ #endif
+--- a/frontends/sfe/ecm_sfe_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ipv6.c
+@@ -97,6 +97,9 @@
+ #endif
+ #include "ecm_front_end_common.h"
+ #include "ecm_front_end_ipv6.h"
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++#include <ovsmgr.h>
++#endif
+ 
+ int ecm_sfe_ipv6_no_action_limit_default = 250;		/* Default no-action limit. */
+ int ecm_sfe_ipv6_driver_fail_limit_default = 250;		/* Default driver fail limit. */
+@@ -965,12 +968,102 @@ static unsigned int ecm_sfe_ipv6_post_ro
+ 		return NF_ACCEPT;
+ 	}
+ 
++#ifndef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++	/*
++	 * skip OpenVSwitch flows because we don't accelerate them
++	 */
++	if (netif_is_ovs_master(out) || netif_is_ovs_master(in)) {
++		dev_put(in);
++		return NF_ACCEPT;
++	}
++#endif
++
+ 	DEBUG_TRACE("Post routing process skb %px, out: %px, in: %px\n", skb, out, in);
+ 	result = ecm_sfe_ipv6_ip_process((struct net_device *)out, in, NULL, NULL, can_accel, true, false, skb);
+ 	dev_put(in);
+ 	return result;
+ }
+ 
++
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++/*
++ * ecm_sfe_ipv6_ovs_dp_process()
++ *      Process OVS IPv6 bridged packets.
++ */
++unsigned int ecm_sfe_ipv6_ovs_dp_process(struct sk_buff *skb, struct net_device *out)
++{
++        struct ethhdr *skb_eth_hdr;
++        bool can_accel = true;
++        struct net_device *in;
++
++	/*
++	 * If operations have stopped then do not process packets
++	 */
++	spin_lock_bh(&ecm_sfe_ipv6_lock);
++	if (unlikely(ecm_front_end_ipv6_stopped)) {
++		spin_unlock_bh(&ecm_sfe_ipv6_lock);
++		DEBUG_TRACE("Front end stopped\n");
++		return 1;
++	}
++	spin_unlock_bh(&ecm_sfe_ipv6_lock);
++
++	/*
++	 * Don't process broadcast.
++	 */
++	if (skb->pkt_type == PACKET_BROADCAST) {
++		DEBUG_TRACE("Broadcast, ignoring: %px\n", skb);
++		return 1;
++	}
++
++	if (skb->protocol != ntohs(ETH_P_IPV6)) {
++		DEBUG_WARN("%px: Wrong skb protocol: %d", skb, skb->protocol);
++		return 1;
++	}
++
++        skb_eth_hdr = eth_hdr(skb);
++        if (!skb_eth_hdr) {
++                DEBUG_WARN("%px: Not Eth\n", skb);
++                return 1;
++        }
++
++        in = dev_get_by_index(&init_net, skb->skb_iif);
++        if (!in) {
++                DEBUG_WARN("%px: No in device\n", skb);
++                return 1;
++        }
++
++        DEBUG_TRACE("%px: in: %s out: %s skb->protocol: %x\n", skb, in->name, out->name, skb->protocol);
++
++	if (netif_is_ovs_master(in)) {
++		if (!ecm_mac_addr_equal(skb_eth_hdr->h_dest, in->dev_addr)) {
++			DEBUG_TRACE("%px: in is bridge and mac address equals to packet dest, flow is routed, ignore \n", skb);
++			dev_put(in);
++			return 1;
++		}
++	}
++
++	if (netif_is_ovs_master(out)) {
++		if (!ecm_mac_addr_equal(skb_eth_hdr->h_source, out->dev_addr)) {
++			DEBUG_TRACE("%px: out is bridge and mac address equals to packet source, flow is routed, ignore \n", skb);
++			dev_put(in);
++			return 1;
++		}
++	}
++
++        ecm_sfe_ipv6_ip_process((struct net_device *)out, in,
++                                skb_eth_hdr->h_source, skb_eth_hdr->h_dest, can_accel, false, false, skb);
++        dev_put(in);
++
++        return 0;
++}
++
++static struct ovsmgr_dp_hook_ops ecm_sfe_ipv6_dp_hooks = {
++	.protocol = 6,
++	.hook_num = OVSMGR_DP_HOOK_POST_FLOW_PROC,
++	.hook = ecm_sfe_ipv6_ovs_dp_process,
++};
++#endif
++
+ /*
+  * ecm_sfe_ipv6_stats_sync_callback()
+  *	Callback handler from the sfe driver.
+@@ -1651,6 +1744,10 @@ int ecm_sfe_ipv6_init(struct dentry *den
+ #ifdef ECM_MULTICAST_ENABLE
+ 	ecm_sfe_multicast_ipv6_init();
+ #endif
++
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++	ovsmgr_dp_hook_register(&ecm_sfe_ipv6_dp_hooks);
++#endif
+ 	return 0;
+ 
+ task_cleanup:
+@@ -1696,5 +1793,9 @@ void ecm_sfe_ipv6_exit(void)
+ #ifdef ECM_MULTICAST_ENABLE
+ 	ecm_sfe_multicast_ipv6_exit();
+ #endif
++
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++	ovsmgr_dp_hook_unregister(&ecm_sfe_ipv6_dp_hooks);
++#endif
+ }
+ EXPORT_SYMBOL(ecm_sfe_ipv6_exit);

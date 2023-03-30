@@ -1,0 +1,189 @@
+--- a/frontends/nss/ecm_nss_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_ported_ipv4.c
+@@ -370,6 +370,9 @@ static void ecm_nss_ported_ipv4_connecti
+ 	uint8_t dest_mac_xlate[ETH_ALEN];
+ 	ecm_db_direction_t ecm_dir;
+ 	ecm_front_end_acceleration_mode_t result_mode;
++	ecm_db_iface_type_t if_type;
++	char if_name[IFNAMSIZ] = {0};
++
+ 
+ 	DEBUG_CHECK_MAGIC(npci, ECM_NSS_PORTED_IPV4_CONNECTION_INSTANCE_MAGIC, "%px: magic failed", npci);
+ 
+@@ -460,10 +463,31 @@ static void ecm_nss_ported_ipv4_connecti
+ 	/*
+ 	 * Get NSS interface ID of the top interface in heirarchy
+ 	 */
+-	from_nss_iface = from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1];
+-	to_nss_iface = to_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1];
+-	nircm->nexthop_rule.flow_nexthop = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
+-	nircm->nexthop_rule.return_nexthop = ecm_db_iface_ae_interface_identifier_get(to_nss_iface);
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= from_ifaces_first; list_index--)
++	{
++		from_nss_iface = from_ifaces[list_index];
++		if (from_nss_iface)
++		{
++			ecm_db_iface_interface_name_get(from_nss_iface, if_name);
++			if_type = ecm_db_iface_type_get(from_nss_iface);
++			nircm->nexthop_rule.flow_nexthop = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
++			DEBUG_TRACE("accel-ingress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= to_ifaces_first; list_index--)
++	{
++		to_nss_iface = to_ifaces[list_index];
++		if (to_nss_iface)
++		{
++			ecm_db_iface_interface_name_get(to_nss_iface, if_name);
++			if_type = ecm_db_iface_type_get(to_nss_iface);
++			nircm->nexthop_rule.return_nexthop = ecm_db_iface_ae_interface_identifier_get(to_nss_iface);
++			DEBUG_TRACE("accel-egress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
+ 
+ 	/*
+ 	 * New rule being created
+--- a/frontends/nss/ecm_nss_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_ported_ipv6.c
+@@ -374,6 +374,8 @@ static void ecm_nss_ported_ipv6_connecti
+ 	ip_addr_t src_ip;
+ 	ip_addr_t dest_ip;
+ 	ecm_front_end_acceleration_mode_t result_mode;
++	ecm_db_iface_type_t if_type;
++	char if_name[IFNAMSIZ] = {0};
+ 
+ 	DEBUG_CHECK_MAGIC(npci, ECM_NSS_PORTED_IPV6_CONNECTION_INSTANCE_MAGIC, "%px: magic failed", npci);
+ 
+@@ -464,10 +466,31 @@ static void ecm_nss_ported_ipv6_connecti
+ 	/*
+ 	 * Get NSS interface ID of the top interface in heirarchy
+ 	 */
+-	from_nss_iface = from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1];
+-	to_nss_iface = to_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1];
+-	nircm->nexthop_rule.flow_nexthop = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
+-	nircm->nexthop_rule.return_nexthop = ecm_db_iface_ae_interface_identifier_get(to_nss_iface);
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= from_ifaces_first; list_index--)
++	{
++		from_nss_iface = from_ifaces[list_index];
++		if (from_nss_iface)
++		{
++			ecm_db_iface_interface_name_get(from_nss_iface, if_name);
++			if_type = ecm_db_iface_type_get(from_nss_iface);
++			nircm->nexthop_rule.flow_nexthop = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
++			DEBUG_TRACE("accel-ingress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= to_ifaces_first; list_index--)
++	{
++		to_nss_iface = to_ifaces[list_index];
++		if (to_nss_iface)
++		{
++			ecm_db_iface_interface_name_get(to_nss_iface, if_name);
++			if_type = ecm_db_iface_type_get(to_nss_iface);
++			nircm->nexthop_rule.return_nexthop = ecm_db_iface_ae_interface_identifier_get(to_nss_iface);
++			DEBUG_TRACE("accel-egress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
+ 
+ 	/*
+ 	 * New rule being created
+--- a/frontends/nss/ecm_nss_non_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_non_ported_ipv4.c
+@@ -441,6 +441,8 @@ static void ecm_nss_non_ported_ipv4_conn
+ 	uint8_t dest_mac_xlate[ETH_ALEN];
+ 	ecm_db_direction_t ecm_dir;
+ 	ecm_front_end_acceleration_mode_t result_mode;
++	ecm_db_iface_type_t if_type;
++	char if_name[IFNAMSIZ] = {0};
+ #ifdef ECM_INTERFACE_PPTP_ENABLE
+ 	struct ecm_db_interface_info_pptp pptp_info;
+ #endif
+@@ -524,10 +526,31 @@ static void ecm_nss_non_ported_ipv4_conn
+ 	/*
+ 	 * Get NSS interface ID of the top interface in heirarchy
+ 	 */
+-	from_nss_iface = from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1];
+-	to_nss_iface = to_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1];
+-	nircm->nexthop_rule.flow_nexthop = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
+-	nircm->nexthop_rule.return_nexthop = ecm_db_iface_ae_interface_identifier_get(to_nss_iface);
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= from_ifaces_first; list_index--)
++	{
++		from_nss_iface = from_ifaces[list_index];
++		if (from_nss_iface)
++		{
++			ecm_db_iface_interface_name_get(from_nss_iface, if_name);
++			if_type = ecm_db_iface_type_get(from_nss_iface);
++			nircm->nexthop_rule.flow_nexthop = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
++			DEBUG_TRACE("accel-ingress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= to_ifaces_first; list_index--)
++	{
++		to_nss_iface = to_ifaces[list_index];
++		if (to_nss_iface)
++		{
++			ecm_db_iface_interface_name_get(to_nss_iface, if_name);
++			if_type = ecm_db_iface_type_get(to_nss_iface);
++			nircm->nexthop_rule.return_nexthop = ecm_db_iface_ae_interface_identifier_get(to_nss_iface);
++			DEBUG_TRACE("accel-egress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
+ 
+ 	/*
+ 	 * New rule being created
+--- a/frontends/nss/ecm_nss_non_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_non_ported_ipv6.c
+@@ -358,6 +358,8 @@ static void ecm_nss_non_ported_ipv6_conn
+ 	ip_addr_t src_ip;
+ 	ip_addr_t dest_ip;
+ 	ecm_front_end_acceleration_mode_t result_mode;
++	ecm_db_iface_type_t if_type;
++	char if_name[IFNAMSIZ] = {0};
+ #if defined(ECM_INTERFACE_GRE_TAP_ENABLE) || defined(ECM_INTERFACE_GRE_TUN_ENABLE)
+ 	struct net_device *dev;
+ #endif
+@@ -451,10 +453,31 @@ static void ecm_nss_non_ported_ipv6_conn
+ 	/*
+ 	 * Get NSS interface ID of the top interface in heirarchy
+ 	 */
+-	from_nss_iface = from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1];
+-	to_nss_iface = to_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX - 1];
+-	nircm->nexthop_rule.flow_nexthop = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
+-	nircm->nexthop_rule.return_nexthop = ecm_db_iface_ae_interface_identifier_get(to_nss_iface);
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= from_ifaces_first; list_index--)
++	{
++		from_nss_iface = from_ifaces[list_index];
++		if (from_nss_iface)
++		{
++			ecm_db_iface_interface_name_get(from_nss_iface, if_name);
++			if_type = ecm_db_iface_type_get(from_nss_iface);
++			nircm->nexthop_rule.flow_nexthop = ecm_db_iface_ae_interface_identifier_get(from_nss_iface);
++			DEBUG_TRACE("accel-ingress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= to_ifaces_first; list_index--)
++	{
++		to_nss_iface = to_ifaces[list_index];
++		if (to_nss_iface)
++		{
++			ecm_db_iface_interface_name_get(to_nss_iface, if_name);
++			if_type = ecm_db_iface_type_get(to_nss_iface);
++			nircm->nexthop_rule.return_nexthop = ecm_db_iface_ae_interface_identifier_get(to_nss_iface);
++			DEBUG_TRACE("accel-egress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
+ 
+ 	/*
+ 	 * New rule being created

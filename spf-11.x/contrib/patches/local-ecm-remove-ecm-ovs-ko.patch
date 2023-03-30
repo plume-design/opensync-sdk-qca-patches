@@ -1,0 +1,26 @@
+--- a/qsdk/qca/feeds/nss-host/qca-nss-ecm/Makefile
++++ b/qsdk/qca/feeds/nss-host/qca-nss-ecm/Makefile
+@@ -22,15 +22,6 @@ ifeq ($(CONFIG_QCA_NSS_ECM_EXAMPLES_MARK
+        FILES_EXAMPLES+=$(PKG_BUILD_DIR)/examples/ecm_mark_test.ko
+ endif
+ 
+-#Explicitly enable OVS external module, if ovsmgr is enabled.
+-ifneq ($(CONFIG_PACKAGE_kmod-qca-ovsmgr),)
+-CONFIG_QCA_NSS_ECM_OVS=y
+-endif
+-
+-ifeq ($(CONFIG_QCA_NSS_ECM_OVS),y)
+-       FILES_EXAMPLES+=$(PKG_BUILD_DIR)/examples/ecm_ovs.ko
+-endif
+-
+ define KernelPackage/qca-nss-ecm/Default
+   SECTION:=kernel
+   CATEGORY:=Kernel modules
+@@ -265,7 +256,6 @@ define Build/Compile
+ 		EXTRA_CFLAGS="$(EXTRA_CFLAGS)" SoC="$(subtarget)" \
+ 		EXAMPLES_BUILD_PCC="$(CONFIG_QCA_NSS_ECM_EXAMPLES_PCC)" \
+ 		EXAMPLES_BUILD_MARK="$(CONFIG_QCA_NSS_ECM_EXAMPLES_MARK)" \
+-		EXAMPLES_BUILD_OVS="$(CONFIG_QCA_NSS_ECM_OVS)" \
+ 		modules
+ endef
+ 

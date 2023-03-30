@@ -1,0 +1,11 @@
+--- a/ovsmgr_dp.c
++++ b/ovsmgr_dp.c
+@@ -577,7 +577,7 @@ static bool ovsmgr_dp_flow_can_ipv6_set_
+ 		__be32 *daddr = (__be32 *)&ip6h->daddr;
+ 		__be32 new_addr[4];
+ 
+-		ovsmgr_dp_ipv6_mask_addr(daddr, key->ipv6_src, mask->ipv6_src, new_addr);
++		ovsmgr_dp_ipv6_mask_addr(daddr, key->ipv6_dst, mask->ipv6_dst, new_addr);
+ 		if (unlikely(memcmp(daddr, new_addr, sizeof(new_addr)))) {
+ 			ovsmgr_trace("%px: Destination IP address is changing - %pI6->%pI6\n", key, daddr, new_addr);
+ 			return false;

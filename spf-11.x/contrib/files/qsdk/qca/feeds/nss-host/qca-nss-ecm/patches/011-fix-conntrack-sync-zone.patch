@@ -1,0 +1,213 @@
+--- a/ecm_db/ecm_db_connection.h
++++ b/ecm_db/ecm_db_connection.h
+@@ -67,6 +67,7 @@ struct ecm_db_connection_instance {
+ 	bool timer_no_touch;					/* RO: Do no update timer when this flag is set */
+ 	uint16_t l2_encap_proto;				/* L2 encap protocol of the flow of this connection */
+ 	uint32_t mark;						/* The result value of mark classifier on this connection */
++	struct nf_conntrack_zone ct_zone;			/* Conntrack zone struct */
+ 
+ 	/*
+ 	 * Connection endpoint mapping
+--- a/ecm_db/ecm_db_connection.c
++++ b/ecm_db/ecm_db_connection.c
+@@ -3374,6 +3374,11 @@ struct ecm_db_connection_instance *ecm_d
+ 	ci->interface_first[ECM_DB_OBJ_DIR_FROM_NAT] = ECM_DB_IFACE_HEIRARCHY_MAX;
+ 	ci->interface_first[ECM_DB_OBJ_DIR_TO_NAT] = ECM_DB_IFACE_HEIRARCHY_MAX;
+ 
++	/*
++	 * Initialise default conntrack zone
++	 */
++	memcpy(&ci->ct_zone, &nf_ct_zone_dflt, sizeof(nf_ct_zone_dflt));
++
+ #ifdef ECM_MULTICAST_ENABLE
+ 	for (i = 0; i < ECM_DB_MULTICAST_IF_MAX; ++i) {
+ 		ci->to_mcast_interface_first[i] = ECM_DB_IFACE_HEIRARCHY_MAX;
+--- a/frontends/nss/ecm_nss_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_ported_ipv4.c
+@@ -396,6 +396,15 @@ static void ecm_nss_ported_ipv4_connecti
+ 	}
+ 
+ 	/*
++	 * Copy conntrack zone into connection instance
++	 */
++	if (ct) {
++		struct ecm_db_connection_instance *ci = feci->ci;
++		const struct nf_conntrack_zone *zone = nf_ct_zone(ct);
++		memcpy(&ci->ct_zone, zone, sizeof(*zone));
++	}
++
++	/*
+ 	 * Okay construct an accel command.
+ 	 * Initialise creation structure.
+ 	 * NOTE: We leverage the app_data void pointer to be our 32 bit connection serial number.
+--- a/frontends/nss/ecm_nss_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_ported_ipv6.c
+@@ -400,6 +400,15 @@ static void ecm_nss_ported_ipv6_connecti
+ 	}
+ 
+ 	/*
++	 * Copy conntrack zone into connection instance
++	 */
++	if (ct) {
++		struct ecm_db_connection_instance *ci = feci->ci;
++		const struct nf_conntrack_zone *zone = nf_ct_zone(ct);
++		memcpy(&ci->ct_zone, zone, sizeof(*zone));
++	}
++
++	/*
+ 	 * Okay construct an accel command.
+ 	 * Initialise creation structure.
+ 	 * NOTE: We leverage the app_data void pointer to be our 32 bit connection serial number.
+--- a/frontends/nss/ecm_nss_non_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_non_ported_ipv4.c
+@@ -411,7 +411,7 @@ static void ecm_nss_non_ported_ipv4_conn
+  * can all use and reduce the amount of code!
+  */
+ static void ecm_nss_non_ported_ipv4_connection_accelerate(struct ecm_front_end_connection_instance *feci, bool is_l2_encap,
+-									struct ecm_classifier_process_response *pr)
++									struct ecm_classifier_process_response *pr, struct nf_conn *ct)
+ {
+ 	struct ecm_nss_non_ported_ipv4_connection_instance *nnpci = (struct ecm_nss_non_ported_ipv4_connection_instance *)feci;
+ 	uint16_t regen_occurrances;
+@@ -469,6 +469,15 @@ static void ecm_nss_non_ported_ipv4_conn
+ 	}
+ 
+ 	/*
++	 * Copy conntrack zone into connection instance
++	 */
++	if (ct) {
++		struct ecm_db_connection_instance *ci = feci->ci;
++		const struct nf_conntrack_zone *zone = nf_ct_zone(ct);
++		memcpy(&ci->ct_zone, zone, sizeof(*zone));
++	}
++
++	/*
+ 	 * Okay construct an accel command.
+ 	 * Initialise creation structure.
+ 	 * NOTE: We leverage the app_data void pointer to be our 32 bit connection serial number.
+@@ -2602,7 +2611,7 @@ done:
+ 	if (prevalent_pr.accel_mode == ECM_CLASSIFIER_ACCELERATION_MODE_ACCEL) {
+ 		DEBUG_TRACE("%px: accel\n", ci);
+ 		feci = ecm_db_connection_front_end_get_and_ref(ci);
+-		ecm_nss_non_ported_ipv4_connection_accelerate(feci, is_l2_encap, &prevalent_pr);
++		ecm_nss_non_ported_ipv4_connection_accelerate(feci, is_l2_encap, &prevalent_pr, ct);
+ 		feci->deref(feci);
+ 	}
+ 	ecm_db_connection_deref(ci);
+--- a/frontends/nss/ecm_nss_non_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_non_ported_ipv6.c
+@@ -331,7 +331,8 @@ static void ecm_nss_non_ported_ipv6_conn
+  * can all use and reduce the amount of code!
+  */
+ static void ecm_nss_non_ported_ipv6_connection_accelerate(struct ecm_front_end_connection_instance *feci,
+-									struct ecm_classifier_process_response *pr, bool is_l2_encap)
++									struct ecm_classifier_process_response *pr, bool is_l2_encap,
++									struct nf_conn *ct)
+ {
+ 	struct ecm_nss_non_ported_ipv6_connection_instance *nnpci = (struct ecm_nss_non_ported_ipv6_connection_instance *)feci;
+ 	uint16_t regen_occurrances;
+@@ -386,6 +387,15 @@ static void ecm_nss_non_ported_ipv6_conn
+ 	}
+ 
+ 	/*
++	 * Copy conntrack zone into connection instance
++	 */
++	if (ct) {
++		struct ecm_db_connection_instance *ci = feci->ci;
++		const struct nf_conntrack_zone *zone = nf_ct_zone(ct);
++		memcpy(&ci->ct_zone, zone, sizeof(*zone));
++	}
++
++	/*
+ 	 * Okay construct an accel command.
+ 	 * Initialise creation structure.
+ 	 * NOTE: We leverage the app_data void pointer to be our 32 bit connection serial number.
+@@ -2316,7 +2326,7 @@ done:
+ 	if (prevalent_pr.accel_mode == ECM_CLASSIFIER_ACCELERATION_MODE_ACCEL) {
+ 		DEBUG_TRACE("%px: accel\n", ci);
+ 		feci = ecm_db_connection_front_end_get_and_ref(ci);
+-		ecm_nss_non_ported_ipv6_connection_accelerate(feci, &prevalent_pr, is_l2_encap);
++		ecm_nss_non_ported_ipv6_connection_accelerate(feci, &prevalent_pr, is_l2_encap, ct);
+ 		feci->deref(feci);
+ 	}
+ 	ecm_db_connection_deref(ci);
+--- a/frontends/nss/ecm_nss_ipv4.c
++++ b/frontends/nss/ecm_nss_ipv4.c
+@@ -2099,7 +2099,6 @@ static inline void ecm_nss_ipv4_process_
+ 	 * Keep connection alive and updated
+ 	 */
+ 	if (!ecm_db_connection_defunct_timer_touch(ci)) {
+-		ecm_db_connection_deref(ci);
+ 		goto sync_conntrack;
+ 	}
+ 
+@@ -2267,7 +2266,6 @@ static inline void ecm_nss_ipv4_process_
+ 	}
+ 
+ 	feci->deref(feci);
+-	ecm_db_connection_deref(ci);
+ 
+ sync_conntrack:
+ 	;
+@@ -2286,9 +2284,11 @@ sync_conntrack:
+ 	tuple.dst.u.all = (__be16)htons(sync->return_ident);
+ 
+ 	DEBUG_TRACE("Conntrack sync, lookup conntrack connection using\n"
++			"Zone: %u\n"
+ 			"Protocol: %d\n"
+ 			"src_addr: %pI4:%d\n"
+ 			"dest_addr: %pI4:%d\n",
++			ci->ct_zone.id,
+ 			(int)tuple.dst.protonum,
+ 			&tuple.src.u3.ip, (int)(ntohs(tuple.src.u.all)),
+ 			&tuple.dst.u3.ip, (int)(ntohs(tuple.dst.u.all)));
+@@ -2296,7 +2296,8 @@ sync_conntrack:
+ 	/*
+ 	 * Look up conntrack connection
+ 	 */
+-	h = nf_conntrack_find_get(&init_net, &nf_ct_zone_dflt, &tuple);
++	h = nf_conntrack_find_get(&init_net, &ci->ct_zone, &tuple);
++	ecm_db_connection_deref(ci);
+ 	if (!h) {
+ 		DEBUG_WARN("%px: NSS Sync: no conntrack connection\n", sync);
+ 		return;
+--- a/frontends/nss/ecm_nss_ipv6.c
++++ b/frontends/nss/ecm_nss_ipv6.c
+@@ -1835,7 +1835,6 @@ static inline void ecm_nss_ipv6_process_
+ 	 * Keep connection alive and updated
+ 	 */
+ 	if (!ecm_db_connection_defunct_timer_touch(ci)) {
+-		ecm_db_connection_deref(ci);
+ 		goto sync_conntrack;
+ 	}
+ 
+@@ -2002,7 +2001,6 @@ static inline void ecm_nss_ipv6_process_
+ 	}
+ 
+ 	feci->deref(feci);
+-	ecm_db_connection_deref(ci);
+ 
+ sync_conntrack:
+ 	;
+@@ -2021,9 +2019,11 @@ sync_conntrack:
+ 	tuple.dst.u.all = (__be16)htons(sync->return_ident);
+ 
+ 	DEBUG_TRACE("Conntrack sync, lookup conntrack connection using\n"
++			"Zone: %u\n"
+ 			"Protocol: %d\n"
+ 			"src_addr: " ECM_IP_ADDR_OCTAL_FMT ":%d\n"
+ 			"dest_addr: " ECM_IP_ADDR_OCTAL_FMT ":%d\n",
++			ci->ct_zone.id,
+ 			(int)tuple.dst.protonum,
+ 			ECM_IP_ADDR_TO_OCTAL(flow_ip), (int)ntohs(tuple.src.u.all),
+ 			ECM_IP_ADDR_TO_OCTAL(return_ip), (int)ntohs(tuple.dst.u.all));
+@@ -2031,7 +2031,8 @@ sync_conntrack:
+ 	/*
+ 	 * Look up conntrack connection
+ 	 */
+-	h = nf_conntrack_find_get(&init_net, &nf_ct_zone_dflt, &tuple);
++	h = nf_conntrack_find_get(&init_net, &ci->ct_zone, &tuple);
++	ecm_db_connection_deref(ci);
+ 	if (!h) {
+ 		DEBUG_WARN("%px: NSS Sync: no conntrack connection\n", sync);
+ 		return;

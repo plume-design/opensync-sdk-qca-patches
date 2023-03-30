@@ -1,0 +1,310 @@
+--- a/frontends/sfe/ecm_sfe_ported_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv4.c
+@@ -347,6 +347,8 @@ static void ecm_sfe_ported_ipv4_connecti
+ 	uint8_t dest_mac_xlate[ETH_ALEN];
+ 	ecm_db_direction_t ecm_dir;
+ 	ecm_front_end_acceleration_mode_t result_mode;
++	ecm_db_iface_type_t if_type;
++	char if_name[32]={0};
+ 
+ 	DEBUG_CHECK_MAGIC(npci, ECM_SFE_PORTED_IPV4_CONNECTION_INSTANCE_MAGIC, "%px: magic failed", npci);
+ 
+@@ -429,11 +431,6 @@ static void ecm_sfe_ported_ipv4_connecti
+ 	}
+ 
+ 	/*
+-	 * New rule being created
+-	 */
+-	nircm->valid_flags |= SFE_RULE_CREATE_CONN_VALID;
+-
+-	/*
+ 	 * Set interface numbers involved in accelerating this connection.
+ 	 * These are the outer facing addresses from the heirarchy interface lists we got above.
+ 	 * These may be overridden later if we detect special interface types e.g. ipsec.
+@@ -445,8 +442,25 @@ static void ecm_sfe_ported_ipv4_connecti
+ 	 * Set interface numbers involved in accelerating this connection.
+ 	 * These are the inner facing addresses from the heirarchy interface lists we got above.
+ 	 */
+-	nim.msg.rule_create.conn_rule.flow_top_interface_num = ecm_db_iface_interface_identifier_get(from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX-1]);
+-	nim.msg.rule_create.conn_rule.return_top_interface_num = ecm_db_iface_interface_identifier_get(to_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX-1]);
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= from_ifaces_first; list_index--)
++	{
++		from_sfe_iface = from_ifaces[list_index];
++		if (from_sfe_iface)
++		{
++			ecm_db_iface_interface_name_get(from_sfe_iface, if_name);
++			if_type = ecm_db_iface_type_get(from_sfe_iface);
++			nim.msg.rule_create.conn_rule.flow_top_interface_num = ecm_db_iface_interface_identifier_get(from_sfe_iface);
++			DEBUG_TRACE("accel-ingress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	/*
++	* New rule being created
++	*/
++	nircm->valid_flags |= SFE_RULE_CREATE_CONN_VALID;
++
++	list_index += 1;
+ 
+ 	/*
+ 	 * We know that each outward facing interface is known to the SFE and so this connection could be accelerated.
+@@ -461,7 +475,7 @@ static void ecm_sfe_ported_ipv4_connecti
+ 	DEBUG_TRACE("%px: Examine from/src heirarchy list\n", npci);
+ 	memset(interface_type_counts, 0, sizeof(interface_type_counts));
+ 	rule_invalid = false;
+-	for (list_index = from_ifaces_first; !rule_invalid && (list_index < ECM_DB_IFACE_HEIRARCHY_MAX); list_index++) {
++	for (/* list_index = from_ifaces_first */; !rule_invalid && (list_index < ECM_DB_IFACE_HEIRARCHY_MAX); list_index++) {
+ 		struct ecm_db_iface_instance *ii;
+ 		ecm_db_iface_type_t ii_type;
+ 		char *ii_name;
+@@ -642,12 +656,31 @@ static void ecm_sfe_ported_ipv4_connecti
+ 	}
+ 
+ 	/*
++	 * Set interface numbers involved in accelerating this connection.
++	 * These are the inner facing addresses from the heirarchy interface lists we got above.
++	 */
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= to_ifaces_first; list_index--)
++	{
++		to_sfe_iface = to_ifaces[list_index];
++		if (to_sfe_iface)
++		{
++			ecm_db_iface_interface_name_get(to_sfe_iface, if_name);
++			if_type = ecm_db_iface_type_get(to_sfe_iface);
++			nim.msg.rule_create.conn_rule.return_top_interface_num = ecm_db_iface_interface_identifier_get(to_sfe_iface);
++			DEBUG_TRACE("accel-egress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	list_index += 1;
++
++	/*
+ 	 * Now examine the TO / DEST heirarchy list to construct the destination part of the rule
+ 	 */
+ 	DEBUG_TRACE("%px: Examine to/dest heirarchy list\n", npci);
+ 	memset(interface_type_counts, 0, sizeof(interface_type_counts));
+ 	rule_invalid = false;
+-	for (list_index = to_ifaces_first; !rule_invalid && (list_index < ECM_DB_IFACE_HEIRARCHY_MAX); list_index++) {
++	for (/* list_index = to_ifaces_first */; !rule_invalid && (list_index < ECM_DB_IFACE_HEIRARCHY_MAX); list_index++) {
+ 		struct ecm_db_iface_instance *ii;
+ 		ecm_db_iface_type_t ii_type;
+ 		char *ii_name;
+--- a/frontends/sfe/ecm_sfe_ported_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv6.c
+@@ -352,6 +352,8 @@ static void ecm_sfe_ported_ipv6_connecti
+ 	ip_addr_t src_ip;
+ 	ip_addr_t dest_ip;
+ 	ecm_front_end_acceleration_mode_t result_mode;
++	ecm_db_iface_type_t if_type;
++	char if_name[32]={0};
+ 
+ 	DEBUG_CHECK_MAGIC(npci, ECM_SFE_PORTED_IPV6_CONNECTION_INSTANCE_MAGIC, "%px: magic failed", npci);
+ 
+@@ -434,11 +436,6 @@ static void ecm_sfe_ported_ipv6_connecti
+ 	}
+ 
+ 	/*
+-	 * New rule being created
+-	 */
+-	nircm->valid_flags |= SFE_RULE_CREATE_CONN_VALID;
+-
+-	/*
+ 	 * Set interface numbers involved in accelerating this connection.
+ 	 * These are the outer facing addresses from the heirarchy interface lists we got above.
+ 	 * These may be overridden later if we detect special interface types e.g. ipsec.
+@@ -450,8 +447,25 @@ static void ecm_sfe_ported_ipv6_connecti
+ 	 * Set interface numbers involved in accelerating this connection.
+ 	 * These are the inner facing addresses from the heirarchy interface lists we got above.
+ 	 */
+-	nim.msg.rule_create.conn_rule.flow_top_interface_num = ecm_db_iface_interface_identifier_get(from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX-1]);
+-	nim.msg.rule_create.conn_rule.return_top_interface_num = ecm_db_iface_interface_identifier_get(to_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX-1]);
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= from_ifaces_first; list_index--)
++	{
++		from_sfe_iface = from_ifaces[list_index];
++		if (from_sfe_iface)
++		{
++			ecm_db_iface_interface_name_get(from_sfe_iface, if_name);
++			if_type = ecm_db_iface_type_get(from_sfe_iface);
++			nim.msg.rule_create.conn_rule.flow_top_interface_num = ecm_db_iface_interface_identifier_get(from_sfe_iface);
++			DEBUG_TRACE("accel-ingress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	/*
++	* New rule being created
++	*/
++	nircm->valid_flags |= SFE_RULE_CREATE_CONN_VALID;
++
++	list_index += 1;
+ 
+ 	/*
+ 	 * We know that each outward facing interface is known to the SFE and so this connection could be accelerated.
+@@ -466,7 +480,7 @@ static void ecm_sfe_ported_ipv6_connecti
+ 	DEBUG_TRACE("%px: Examine from/src heirarchy list\n", npci);
+ 	memset(interface_type_counts, 0, sizeof(interface_type_counts));
+ 	rule_invalid = false;
+-	for (list_index = from_ifaces_first; !rule_invalid && (list_index < ECM_DB_IFACE_HEIRARCHY_MAX); list_index++) {
++	for (/* list_index = from_ifaces_first */; !rule_invalid && (list_index < ECM_DB_IFACE_HEIRARCHY_MAX); list_index++) {
+ 		struct ecm_db_iface_instance *ii;
+ 		ecm_db_iface_type_t ii_type;
+ 		char *ii_name;
+@@ -647,12 +661,31 @@ static void ecm_sfe_ported_ipv6_connecti
+ 	}
+ 
+ 	/*
++	 * Set interface numbers involved in accelerating this connection.
++	 * These are the inner facing addresses from the heirarchy interface lists we got above.
++	 */
++	for (list_index = ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index >= to_ifaces_first; list_index--)
++	{
++		to_sfe_iface = to_ifaces[list_index];
++		if (to_sfe_iface)
++		{
++			ecm_db_iface_interface_name_get(to_sfe_iface, if_name);
++			if_type = ecm_db_iface_type_get(to_sfe_iface);
++			nim.msg.rule_create.conn_rule.return_top_interface_num = ecm_db_iface_interface_identifier_get(to_sfe_iface);
++			DEBUG_TRACE("accel-egress port: %s@%d (type:%d)\n", if_name, list_index, (int)if_type);
++			if ((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	list_index += 1;
++
++	/*
+ 	 * Now examine the TO / DEST heirarchy list to construct the destination part of the rule
+ 	 */
+ 	DEBUG_TRACE("%px: Examine to/dest heirarchy list\n", npci);
+ 	memset(interface_type_counts, 0, sizeof(interface_type_counts));
+ 	rule_invalid = false;
+-	for (list_index = to_ifaces_first; !rule_invalid && (list_index < ECM_DB_IFACE_HEIRARCHY_MAX); list_index++) {
++	for (/* list_index = to_ifaces_first */; !rule_invalid && (list_index < ECM_DB_IFACE_HEIRARCHY_MAX); list_index++) {
+ 		struct ecm_db_iface_instance *ii;
+ 		ecm_db_iface_type_t ii_type;
+ 		char *ii_name;
+--- a/frontends/sfe/ecm_sfe_non_ported_ipv4.c
++++ b/frontends/sfe/ecm_sfe_non_ported_ipv4.c
+@@ -402,6 +402,8 @@ static void ecm_sfe_non_ported_ipv4_conn
+ 	uint8_t dest_mac_xlate[ETH_ALEN];
+ 	ecm_db_direction_t ecm_dir;
+ 	ecm_front_end_acceleration_mode_t result_mode;
++	ecm_db_iface_type_t if_type;
++	char if_name[32]={0};
+ 
+ 	DEBUG_CHECK_MAGIC(nnpci, ECM_SFE_NON_PORTED_IPV4_CONNECTION_INSTANCE_MAGIC, "%px: magic failed", nnpci);
+ 
+@@ -484,11 +486,6 @@ static void ecm_sfe_non_ported_ipv4_conn
+ 	}
+ 
+ 	/*
+-	 * New rule being created
+-	 */
+-	nircm->valid_flags |= SFE_RULE_CREATE_CONN_VALID;
+-
+-	/*
+ 	 * Set interface numbers involved in accelerating this connection.
+ 	 * These are the outer facing addresses from the heirarchy interface lists we got above.
+ 	 * These may be overridden later if we detect special interface types e.g. ipsec.
+@@ -500,8 +497,36 @@ static void ecm_sfe_non_ported_ipv4_conn
+ 	 * Set interface numbers involved in accelerating this connection.
+ 	 * These are the inner facing addresses from the heirarchy interface lists we got above.
+ 	 */
+-	nim.msg.rule_create.conn_rule.flow_top_interface_num = ecm_db_iface_interface_identifier_get(from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX-1]);
+-	nim.msg.rule_create.conn_rule.return_top_interface_num = ecm_db_iface_interface_identifier_get(to_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX-1]);
++	for(list_index=ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index>=from_ifaces_first; list_index--)
++	{
++		from_sfe_iface = from_ifaces[list_index];
++		if(from_sfe_iface)
++		{
++			ecm_db_iface_interface_name_get(from_sfe_iface, if_name);
++			if_type = ecm_db_iface_type_get(from_sfe_iface);
++			nim.msg.rule_create.conn_rule.flow_top_interface_num = ecm_db_iface_interface_identifier_get(from_sfe_iface);
++			DEBUG_TRACE("accel-ingress port: %s@%d (type:%d)\n",if_name, list_index, (int)if_type);
++			if((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	for(list_index=ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index>=to_ifaces_first; list_index--)
++	{
++		to_sfe_iface = to_ifaces[list_index];
++		if(to_sfe_iface)
++		{
++			ecm_db_iface_interface_name_get(to_sfe_iface, if_name);
++			if_type = ecm_db_iface_type_get(to_sfe_iface);
++			nim.msg.rule_create.conn_rule.return_top_interface_num = ecm_db_iface_interface_identifier_get(to_sfe_iface);
++			DEBUG_TRACE("accel-egress port: %s@%d (type:%d)\n",if_name, list_index, (int)if_type);
++			if((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	/*
++	* New rule being created
++	*/
++	nircm->valid_flags |= SFE_RULE_CREATE_CONN_VALID;
+ 
+ 	/*
+ 	 * We know that each outward facing interface is known to the SFE and so this connection could be accelerated.
+--- a/frontends/sfe/ecm_sfe_non_ported_ipv6.c
++++ b/frontends/sfe/ecm_sfe_non_ported_ipv6.c
+@@ -338,6 +338,8 @@ static void ecm_sfe_non_ported_ipv6_conn
+ 	ip_addr_t src_ip;
+ 	ip_addr_t dest_ip;
+ 	ecm_front_end_acceleration_mode_t result_mode;
++	ecm_db_iface_type_t if_type;
++	char if_name[32]={0};
+ 
+ 	DEBUG_CHECK_MAGIC(nnpci, ECM_SFE_NON_PORTED_IPV6_CONNECTION_INSTANCE_MAGIC, "%px: magic failed", nnpci);
+ 
+@@ -420,11 +422,6 @@ static void ecm_sfe_non_ported_ipv6_conn
+ 	}
+ 
+ 	/*
+-	 * New rule being created
+-	 */
+-	nircm->valid_flags |= SFE_RULE_CREATE_CONN_VALID;
+-
+-	/*
+ 	 * Set interface numbers involved in accelerating this connection.
+ 	 * These are the outer facing addresses from the heirarchy interface lists we got above.
+ 	 * These may be overridden later if we detect special interface types e.g. ipsec.
+@@ -436,8 +433,36 @@ static void ecm_sfe_non_ported_ipv6_conn
+ 	 * Set interface numbers involved in accelerating this connection.
+ 	 * These are the inner facing addresses from the heirarchy interface lists we got above.
+ 	 */
+-	nim.msg.rule_create.conn_rule.flow_top_interface_num = ecm_db_iface_interface_identifier_get(from_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX-1]);
+-	nim.msg.rule_create.conn_rule.return_top_interface_num = ecm_db_iface_interface_identifier_get(to_ifaces[ECM_DB_IFACE_HEIRARCHY_MAX-1]);
++	for(list_index=ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index>=from_ifaces_first; list_index--)
++	{
++		from_sfe_iface = from_ifaces[list_index];
++		if(from_sfe_iface)
++		{
++			ecm_db_iface_interface_name_get(from_sfe_iface, if_name);
++			if_type = ecm_db_iface_type_get(from_sfe_iface);
++			nim.msg.rule_create.conn_rule.flow_top_interface_num = ecm_db_iface_interface_identifier_get(from_sfe_iface);
++			DEBUG_TRACE("accel-ingress port: %s@%d (type:%d)\n",if_name, list_index, (int)if_type);
++			if((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	for(list_index=ECM_DB_IFACE_HEIRARCHY_MAX-1; list_index>=to_ifaces_first; list_index--)
++	{
++		to_sfe_iface = to_ifaces[list_index];
++		if(to_sfe_iface)
++		{
++			ecm_db_iface_interface_name_get(to_sfe_iface, if_name);
++			if_type = ecm_db_iface_type_get(to_sfe_iface);
++			nim.msg.rule_create.conn_rule.return_top_interface_num = ecm_db_iface_interface_identifier_get(to_sfe_iface);
++			DEBUG_TRACE("accel-egress port: %s@%d (type:%d)\n",if_name, list_index, (int)if_type);
++			if((if_type != ECM_DB_IFACE_TYPE_BRIDGE) && (if_type != ECM_DB_IFACE_TYPE_OVS_BRIDGE)) { break; }
++		}
++	}
++
++	/*
++	* New rule being created
++	*/
++	nircm->valid_flags |= SFE_RULE_CREATE_CONN_VALID;
+ 
+ 	/*
+ 	 * We know that each outward facing interface is known to the SFE and so this connection could be accelerated.

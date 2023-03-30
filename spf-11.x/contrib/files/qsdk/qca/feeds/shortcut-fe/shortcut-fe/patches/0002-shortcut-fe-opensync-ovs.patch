@@ -1,0 +1,842 @@
+Index: shortcut-fe-g2f1360d/shortcut-fe/sfe_cm.h
+===================================================================
+--- shortcut-fe-g2f1360d.orig/shortcut-fe/sfe_cm.h
++++ shortcut-fe-g2f1360d/shortcut-fe/sfe_cm.h
+@@ -76,8 +76,15 @@ struct sfe_connection_create {
+ 	u32 dest_priority;
+ 	u32 src_dscp;
+ 	u32 dest_dscp;
++	bool bridged;
+ };
+ 
++typedef enum sfe_ctmark_value {
++       SFE_ACCELERATION_MODE_INSPECT = 1,
++       SFE_ACCELERATION_MODE_PERMIT = 2,
++       SFE_ACCELERATION_MODE_DENY = 3,
++} sfe_ctmark_value_t;
++
+ /*
+  * connection destruction structure.
+  */
+@@ -128,8 +135,9 @@ struct sfe_connection_sync {
+ 	u64 dest_byte_count;
+ 	u32 dest_new_packet_count;
+ 	u32 dest_new_byte_count;
+-	u32 reason;		/* reason for stats sync message, i.e. destroy, flush, period sync */
++	u32 reason;			/* reason for stats sync message, i.e. destroy, flush, period sync */
+ 	u64 delta_jiffies;		/* Time to be added to the current timeout to keep the connection alive */
++	bool bridged;			/* Bridged connection or routed */
+ };
+ 
+ /*
+@@ -169,8 +177,10 @@ typedef void (*sfe_sync_rule_callback_t)
+  */
+ int sfe_ipv4_recv(struct net_device *dev, struct sk_buff *skb);
+ int sfe_ipv4_create_rule(struct sfe_connection_create *sic);
++int sfe_ipv4_is_rule_existed(struct sfe_connection_create *sic);
+ void sfe_ipv4_destroy_rule(struct sfe_connection_destroy *sid);
+ void sfe_ipv4_destroy_all_rules_for_dev(struct net_device *dev);
++void sfe_ipv4_destroy_all_rules_for_mac(u8 *mac_addr);
+ void sfe_ipv4_register_sync_rule_callback(sfe_sync_rule_callback_t callback);
+ void sfe_ipv4_update_rule(struct sfe_connection_create *sic);
+ void sfe_ipv4_mark_rule(struct sfe_connection_mark *mark);
+@@ -181,8 +191,10 @@ void sfe_ipv4_mark_rule(struct sfe_conne
+  */
+ int sfe_ipv6_recv(struct net_device *dev, struct sk_buff *skb);
+ int sfe_ipv6_create_rule(struct sfe_connection_create *sic);
++int sfe_ipv6_is_rule_existed(struct sfe_connection_create *sic);
+ void sfe_ipv6_destroy_rule(struct sfe_connection_destroy *sid);
+ void sfe_ipv6_destroy_all_rules_for_dev(struct net_device *dev);
++void sfe_ipv6_destroy_all_rules_for_mac(u8 *mac_addr);
+ void sfe_ipv6_register_sync_rule_callback(sfe_sync_rule_callback_t callback);
+ void sfe_ipv6_update_rule(struct sfe_connection_create *sic);
+ void sfe_ipv6_mark_rule(struct sfe_connection_mark *mark);
+@@ -207,6 +219,11 @@ static inline void sfe_ipv6_destroy_all_
+ 	return;
+ }
+ 
++static inline void sfe_ipv6_destroy_all_rules_for_mac(u8 *mac_addr)
++{
++        return;
++}
++
+ static inline void sfe_ipv6_register_sync_rule_callback(sfe_sync_rule_callback_t callback)
+ {
+ 	return;
+Index: shortcut-fe-g2f1360d/shortcut-fe/sfe_ipv4.c
+===================================================================
+--- shortcut-fe-g2f1360d.orig/shortcut-fe/sfe_ipv4.c
++++ shortcut-fe-g2f1360d/shortcut-fe/sfe_ipv4.c
+@@ -295,6 +295,9 @@ struct sfe_ipv4_connection {
+ 					/* Pointer to the previous entry in the list of all connections */
+ 	u32 mark;			/* mark for outgoing packet */
+ 	u32 debug_read_seq;		/* sequence number for debug dump */
++	bool bridged;			/* connection is bridged or not */
++	u8 from_mac[ETH_ALEN];
++	u8 to_mac[ETH_ALEN];
+ };
+ 
+ /*
+@@ -407,6 +410,7 @@ struct sfe_ipv4 {
+ 	struct sfe_ipv4_connection *all_connections_tail;
+ 					/* Tail of the list of all connections */
+ 	unsigned int num_connections;	/* Number of connections */
++	unsigned int num_bridged;	/* Number of bridged connections */
+ 	struct timer_list timer;	/* Timer used for periodic sync ops */
+ 	sfe_sync_rule_callback_t __rcu sync_rule_callback;
+ 					/* Callback function registered by a connection manager for stats syncing */
+@@ -1014,6 +1018,9 @@ static void sfe_ipv4_insert_sfe_ipv4_con
+ 	si->all_connections_tail = c;
+ 	c->all_connections_next = NULL;
+ 	si->num_connections++;
++	if (c->bridged) {
++	    si->num_bridged++;
++	}
+ 
+ 	/*
+ 	 * Insert the connection match objects too.
+@@ -1066,6 +1073,9 @@ static void sfe_ipv4_remove_sfe_ipv4_con
+ 		si->all_connections_tail = c->all_connections_prev;
+ 	}
+ 
++	if (c->bridged) {
++	    si->num_bridged--;
++	}
+ 	si->num_connections--;
+ }
+ 
+@@ -1096,6 +1106,7 @@ static void sfe_ipv4_gen_sync_sfe_ipv4_c
+ 	sis->src_port_xlate = c->src_port_xlate;
+ 	sis->dest_port = c->dest_port;
+ 	sis->dest_port_xlate = c->dest_port_xlate;
++	sis->bridged = c->bridged;
+ 
+ 	original_cm = c->original_match;
+ 	reply_cm = c->reply_match;
+@@ -2476,6 +2487,34 @@ void sfe_ipv4_update_rule(struct sfe_con
+ }
+ 
+ /*
++ * sfe_ipv4_is_rule_existed()
++ *      check if the forwaring rule is already existed
++ */
++int sfe_ipv4_is_rule_existed(struct sfe_connection_create *sic)
++{
++	struct sfe_ipv4 *si = &__si;
++
++	struct sfe_ipv4_connection *c;
++
++	spin_lock_bh(&si->lock);
++	/*
++	 * Check to see if there is already a flow that matches the rule we're
++	 * trying to create.  If there is then we can't create a new one.
++	 */
++	c = sfe_ipv4_find_sfe_ipv4_connection(si,
++					      sic->protocol,
++					      sic->src_ip.ip,
++					      sic->src_port,
++					      sic->dest_ip.ip,
++					      sic->dest_port);
++
++	spin_unlock_bh(&si->lock);
++
++	return (c!=NULL);
++}
++
++
++/*
+  * sfe_ipv4_create_rule()
+  *	Create a forwarding rule.
+  */
+@@ -2487,6 +2526,7 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	struct sfe_ipv4_connection_match *reply_cm;
+ 	struct net_device *dest_dev;
+ 	struct net_device *src_dev;
++	u8 null_macaddr[ETH_ALEN] = {0,0,0,0,0,0};
+ 
+ 	dest_dev = sic->dest_dev;
+ 	src_dev = sic->src_dev;
+@@ -2575,7 +2615,19 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	original_cm->rx_byte_count64 = 0;
+ 	original_cm->xmit_dev = dest_dev;
+ 	original_cm->xmit_dev_mtu = sic->dest_mtu;
+-	memcpy(original_cm->xmit_src_mac, dest_dev->dev_addr, ETH_ALEN);
++
++	if (sic->bridged) {
++		memcpy(original_cm->xmit_src_mac, sic->src_mac, ETH_ALEN); 
++	}
++	else {
++		if (memcmp(sic->src_mac_xlate, null_macaddr, ETH_ALEN)) {
++			memcpy(original_cm->xmit_src_mac, sic->src_mac_xlate, ETH_ALEN);
++		}
++		else {
++			memcpy(original_cm->xmit_src_mac, dest_dev->dev_addr, ETH_ALEN);
++		}
++	}
++
+ 	memcpy(original_cm->xmit_dest_mac, sic->dest_mac_xlate, ETH_ALEN);
+ 	original_cm->connection = c;
+ 	original_cm->counter_match = reply_cm;
+@@ -2635,7 +2687,19 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	reply_cm->rx_byte_count64 = 0;
+ 	reply_cm->xmit_dev = src_dev;
+ 	reply_cm->xmit_dev_mtu = sic->src_mtu;
+-	memcpy(reply_cm->xmit_src_mac, src_dev->dev_addr, ETH_ALEN);
++
++	if (sic->bridged) {
++		memcpy(reply_cm->xmit_src_mac, sic->dest_mac_xlate, ETH_ALEN);
++	}
++	else {
++		if (memcmp(sic->dest_mac, null_macaddr, ETH_ALEN)) {
++			memcpy(reply_cm->xmit_src_mac, sic->dest_mac, ETH_ALEN);
++		}
++		else {
++			memcpy(reply_cm->xmit_src_mac, src_dev->dev_addr, ETH_ALEN);
++		}
++	}
++
+ 	memcpy(reply_cm->xmit_dest_mac, sic->src_mac, ETH_ALEN);
+ 	reply_cm->connection = c;
+ 	reply_cm->counter_match = original_cm;
+@@ -2701,6 +2765,9 @@ int sfe_ipv4_create_rule(struct sfe_conn
+ 	c->reply_match = reply_cm;
+ 	c->mark = sic->mark;
+ 	c->debug_read_seq = 0;
++	c->bridged = sic->bridged;
++	memcpy(c->from_mac, sic->src_mac, ETH_ALEN);
++	memcpy(c->to_mac, sic->dest_mac_xlate, ETH_ALEN);
+ 	c->last_sync_jiffies = get_jiffies_64();
+ 
+ 	/*
+@@ -2829,6 +2896,56 @@ static ssize_t sfe_ipv4_get_debug_dev(st
+ static const struct device_attribute sfe_ipv4_debug_dev_attr =
+ 	__ATTR(debug_dev, S_IWUSR | S_IRUGO, sfe_ipv4_get_debug_dev, NULL);
+ 
++static void sfe_ipv4_destroy_all_rules_timeout(u64 now_jiffies)
++{
++	struct sfe_ipv4 *si = &__si;
++	struct sfe_ipv4_connection *c;
++	struct sfe_ipv4_connection *next;
++	struct sfe_ipv4_connection *removed = NULL;
++	int flushed = 0;
++	static int trigger;
++
++#define FLUSH_TIME 1000   /* 10 seconds */
++#define STALL_TIME 300000 /* 300 seconds */
++
++	if (++trigger % FLUSH_TIME != 0) {
++		/* Flusing based on timeout is done every 10 seconds */
++		return;
++	}
++
++	spin_lock_bh(&si->lock);
++	next = si->all_connections_head;
++
++another_round:
++
++	for (c = next; c; c = c->all_connections_next) {
++		if (jiffies_to_msecs((unsigned long)(now_jiffies - c->last_sync_jiffies)) > STALL_TIME) {
++			break;
++		}
++	}
++
++	if (c) {
++		next = c->all_connections_next; /* c is modified below, so get next node early */
++		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
++		c->all_connections_next = removed;
++		removed = c;
++		goto another_round;
++	}
++
++	spin_unlock_bh(&si->lock);
++
++	for (c = removed; c; c = next) {
++		next = c->all_connections_next; /* c is freed below, so get next node early */
++		sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_DESTROY);
++		flushed++;
++	}
++
++	if (flushed) {
++		printk("%s: flushed %d flows for due to timeout\n", __func__, flushed);
++	}
++}
++
++
+ /*
+  * sfe_ipv4_destroy_all_rules_for_dev()
+  *	Destroy all connections that match a particular device.
+@@ -2839,11 +2956,16 @@ void sfe_ipv4_destroy_all_rules_for_dev(
+ {
+ 	struct sfe_ipv4 *si = &__si;
+ 	struct sfe_ipv4_connection *c;
++	struct sfe_ipv4_connection *next;
++	struct sfe_ipv4_connection *removed = NULL;
++	int flushed = 0;
+ 
+-another_round:
+ 	spin_lock_bh(&si->lock);
++	next = si->all_connections_head;
+ 
+-	for (c = si->all_connections_head; c; c = c->all_connections_next) {
++another_round:
++
++	for (c = next; c; c = c->all_connections_next) {
+ 		/*
+ 		 * Does this connection relate to the device we are destroying?
+ 		 */
+@@ -2855,15 +2977,75 @@ another_round:
+ 	}
+ 
+ 	if (c) {
++		next = c->all_connections_next; /* c is modified below, so get next node early */
+ 		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
++		c->all_connections_next = removed;
++		removed = c;
++		goto another_round;
+ 	}
+ 
+ 	spin_unlock_bh(&si->lock);
+ 
+-	if (c) {
++	for (c = removed; c; c = next) {
++		next = c->all_connections_next; /* c is freed below, so get next node early */
+ 		sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_DESTROY);
++		flushed++;
++	}
++
++	if (flushed) {
++		printk("%s: flushed %d flows for dev=%s\n", __func__, flushed, dev ? dev->name : "all");
++	}
++}
++
++/*
++ * sfe_ipv4_destroy_all_rules_for_mac()
++ *	Destroy all connections that match a particular mac address.
++ *
++ * If we pass dev as NULL then this destroys all connections.
++ */
++void sfe_ipv4_destroy_all_rules_for_mac(u8 *mac_addr)
++{
++	struct sfe_ipv4 *si = &__si;
++	struct sfe_ipv4_connection *c;
++	struct sfe_ipv4_connection *next;
++	struct sfe_ipv4_connection *removed = NULL;
++	int flushed = 0;
++
++	spin_lock_bh(&si->lock);
++	next = si->all_connections_head;
++
++another_round:
++
++	for (c = next; c; c = c->all_connections_next) {
++		/*
++		 * Does this connection relate to the mac address we are destroying?
++		 */
++		if (!mac_addr
++		    || (!memcmp(mac_addr, c->from_mac, ETH_ALEN))
++		    || (!memcmp(mac_addr, c->to_mac, ETH_ALEN))) {
++			break;
++		}
++	}
++
++	if (c) {
++		next = c->all_connections_next; /* c is modified below, so get next node early */
++		sfe_ipv4_remove_sfe_ipv4_connection(si, c);
++		c->all_connections_next = removed;
++		removed = c;
+ 		goto another_round;
+ 	}
++
++	spin_unlock_bh(&si->lock);
++
++	for (c = removed; c; c = next) {
++		next = c->all_connections_next; /* c is freed below, so get next node early */
++		sfe_ipv4_flush_sfe_ipv4_connection(si, c, SFE_SYNC_REASON_DESTROY);
++		flushed++;
++	}
++
++	if (flushed) {
++		printk("%s: flushed %d flows for mac=%pM\n", __func__, flushed, mac_addr);
++	}
+ }
+ 
+ /*
+@@ -2886,6 +3068,9 @@ static void sfe_ipv4_periodic_sync(struc
+ 
+ 	now_jiffies = get_jiffies_64();
+ 
++	/* check if any stall rules */
++	sfe_ipv4_destroy_all_rules_timeout(now_jiffies);
++
+ 	rcu_read_lock();
+ 	sync_rule_callback = rcu_dereference(si->sync_rule_callback);
+ 	if (!sync_rule_callback) {
+@@ -3105,11 +3290,14 @@ static bool sfe_ipv4_debug_dev_read_conn
+ 
+ 	bytes_read = snprintf(msg, CHAR_DEV_MSG_SIZE, "\t\t<connection "
+ 				"protocol=\"%u\" "
++				"bridged=\"%s\" "
++				"src_mac=\"%pM\" "
+ 				"src_dev=\"%s\" "
+ 				"src_ip=\"%pI4\" src_ip_xlate=\"%pI4\" "
+ 				"src_port=\"%u\" src_port_xlate=\"%u\" "
+ 				"src_priority=\"%u\" src_dscp=\"%u\" "
+ 				"src_rx_pkts=\"%llu\" src_rx_bytes=\"%llu\" "
++				"dest_mac_xlate=\"%pM\" "
+ 				"dest_dev=\"%s\" "
+ 				"dest_ip=\"%pI4\" dest_ip_xlate=\"%pI4\" "
+ 				"dest_port=\"%u\" dest_port_xlate=\"%u\" "
+@@ -3121,11 +3309,14 @@ static bool sfe_ipv4_debug_dev_read_conn
+ 				"last_sync=\"%llu\" "
+ 				"mark=\"%08x\" />\n",
+ 				protocol,
++				c->bridged ? "true" : "false",
++				c->from_mac,
+ 				src_dev->name,
+ 				&src_ip, &src_ip_xlate,
+ 				ntohs(src_port), ntohs(src_port_xlate),
+ 				src_priority, src_dscp,
+ 				src_rx_packets, src_rx_bytes,
++				c->to_mac,
+ 				dest_dev->name,
+ 				&dest_ip, &dest_ip_xlate,
+ 				ntohs(dest_port), ntohs(dest_port_xlate),
+@@ -3255,6 +3446,7 @@ static bool sfe_ipv4_debug_dev_read_stat
+ {
+ 	int bytes_read;
+ 	unsigned int num_connections;
++	unsigned int num_bridged;
+ 	u64 packets_forwarded;
+ 	u64 packets_not_forwarded;
+ 	u64 connection_create_requests;
+@@ -3269,6 +3461,7 @@ static bool sfe_ipv4_debug_dev_read_stat
+ 	sfe_ipv4_update_summary_stats(si);
+ 
+ 	num_connections = si->num_connections;
++	num_bridged = si->num_bridged;
+ 	packets_forwarded = si->packets_forwarded64;
+ 	packets_not_forwarded = si->packets_not_forwarded64;
+ 	connection_create_requests = si->connection_create_requests64;
+@@ -3281,13 +3474,14 @@ static bool sfe_ipv4_debug_dev_read_stat
+ 	spin_unlock_bh(&si->lock);
+ 
+ 	bytes_read = snprintf(msg, CHAR_DEV_MSG_SIZE, "\t<stats "
+-			      "num_connections=\"%u\" "
++			      "num_connections=\"%u\" num_bridged=\"%u\" "
+ 			      "pkts_forwarded=\"%llu\" pkts_not_forwarded=\"%llu\" "
+ 			      "create_requests=\"%llu\" create_collisions=\"%llu\" "
+ 			      "destroy_requests=\"%llu\" destroy_misses=\"%llu\" "
+ 			      "flushes=\"%llu\" "
+ 			      "hash_hits=\"%llu\" hash_reorders=\"%llu\" />\n",
+ 			      num_connections,
++			      num_bridged,
+ 			      packets_forwarded,
+ 			      packets_not_forwarded,
+ 			      connection_create_requests,
+@@ -3616,11 +3810,13 @@ module_exit(sfe_ipv4_exit)
+ 
+ EXPORT_SYMBOL(sfe_ipv4_recv);
+ EXPORT_SYMBOL(sfe_ipv4_create_rule);
++EXPORT_SYMBOL(sfe_ipv4_is_rule_existed);
+ EXPORT_SYMBOL(sfe_ipv4_destroy_rule);
+ EXPORT_SYMBOL(sfe_ipv4_destroy_all_rules_for_dev);
+ EXPORT_SYMBOL(sfe_ipv4_register_sync_rule_callback);
+ EXPORT_SYMBOL(sfe_ipv4_mark_rule);
+ EXPORT_SYMBOL(sfe_ipv4_update_rule);
++EXPORT_SYMBOL(sfe_ipv4_destroy_all_rules_for_mac);
+ #ifdef CONFIG_NF_FLOW_COOKIE
+ EXPORT_SYMBOL(sfe_register_flow_cookie_cb);
+ EXPORT_SYMBOL(sfe_unregister_flow_cookie_cb);
+Index: shortcut-fe-g2f1360d/shortcut-fe/sfe_ipv6.c
+===================================================================
+--- shortcut-fe-g2f1360d.orig/shortcut-fe/sfe_ipv6.c
++++ shortcut-fe-g2f1360d/shortcut-fe/sfe_ipv6.c
+@@ -319,6 +319,9 @@ struct sfe_ipv6_connection {
+ 					/* Pointer to the previous entry in the list of all connections */
+ 	u32 mark;			/* mark for outgoing packet */
+ 	u32 debug_read_seq;		/* sequence number for debug dump */
++	bool bridged;			/* connection is bridged or not */
++	u8 from_mac[ETH_ALEN];
++	u8 to_mac[ETH_ALEN];
+ };
+ 
+ /*
+@@ -433,6 +436,7 @@ struct sfe_ipv6 {
+ 	struct sfe_ipv6_connection *all_connections_tail;
+ 					/* Tail of the list of all connections */
+ 	unsigned int num_connections;	/* Number of connections */
++	unsigned int num_bridged;	/* Number of bridged connections */
+ 	struct timer_list timer;	/* Timer used for periodic sync ops */
+ 	sfe_sync_rule_callback_t __rcu sync_rule_callback;
+ 					/* Callback function registered by a connection manager for stats syncing */
+@@ -1073,6 +1077,9 @@ static void sfe_ipv6_insert_connection(s
+ 	si->all_connections_tail = c;
+ 	c->all_connections_next = NULL;
+ 	si->num_connections++;
++	if (c->bridged) {
++	    si->num_bridged++;
++	}
+ 
+ 	/*
+ 	 * Insert the connection match objects too.
+@@ -1125,6 +1132,9 @@ static void sfe_ipv6_remove_connection(s
+ 		si->all_connections_tail = c->all_connections_prev;
+ 	}
+ 
++	if (c->bridged) {
++	    si->num_bridged--;
++	}
+ 	si->num_connections--;
+ }
+ 
+@@ -1155,6 +1165,7 @@ static void sfe_ipv6_gen_sync_connection
+ 	sis->src_port_xlate = c->src_port_xlate;
+ 	sis->dest_port = c->dest_port;
+ 	sis->dest_port_xlate = c->dest_port_xlate;
++	sis->bridged = c->bridged;
+ 
+ 	original_cm = c->original_match;
+ 	reply_cm = c->reply_match;
+@@ -2447,6 +2458,29 @@ sfe_ipv6_update_protocol_state(struct sf
+ }
+ 
+ /*
++ * sfe_ipv6_is_rule_existed()
++ *      check if the forwaring rule is already existed
++ */
++int sfe_ipv6_is_rule_existed(struct sfe_connection_create *sic)
++{
++	struct sfe_ipv6_connection *c;
++	struct sfe_ipv6 *si = &__si6;
++
++	spin_lock_bh(&si->lock);
++
++	c = sfe_ipv6_find_connection(si,
++                                     sic->protocol,
++                                     sic->src_ip.ip6,
++                                     sic->src_port,
++                                     sic->dest_ip.ip6,
++                                     sic->dest_port);
++
++	spin_unlock_bh(&si->lock);
++
++	return (c!=NULL);
++}
++
++/*
+  * sfe_ipv6_update_rule()
+  *	update forwarding rule after rule is created.
+  */
+@@ -2482,6 +2516,7 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	struct sfe_ipv6_connection_match *reply_cm;
+ 	struct net_device *dest_dev;
+ 	struct net_device *src_dev;
++	u8 null_macaddr[ETH_ALEN] = {0,0,0,0,0,0};
+ 
+ 	dest_dev = sic->dest_dev;
+ 	src_dev = sic->src_dev;
+@@ -2569,7 +2604,19 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	original_cm->rx_byte_count64 = 0;
+ 	original_cm->xmit_dev = dest_dev;
+ 	original_cm->xmit_dev_mtu = sic->dest_mtu;
+-	memcpy(original_cm->xmit_src_mac, dest_dev->dev_addr, ETH_ALEN);
++
++	if (sic->bridged) {
++		memcpy(original_cm->xmit_src_mac, sic->src_mac, ETH_ALEN);
++	}
++	else {
++		if (memcmp(sic->src_mac_xlate, null_macaddr, ETH_ALEN)) {
++			memcpy(original_cm->xmit_src_mac, sic->src_mac_xlate, ETH_ALEN);
++		}
++		else {
++			memcpy(original_cm->xmit_src_mac, dest_dev->dev_addr, ETH_ALEN);
++		}
++	}
++
+ 	memcpy(original_cm->xmit_dest_mac, sic->dest_mac_xlate, ETH_ALEN);
+ 	original_cm->connection = c;
+ 	original_cm->counter_match = reply_cm;
+@@ -2628,7 +2675,19 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	reply_cm->rx_byte_count64 = 0;
+ 	reply_cm->xmit_dev = src_dev;
+ 	reply_cm->xmit_dev_mtu = sic->src_mtu;
+-	memcpy(reply_cm->xmit_src_mac, src_dev->dev_addr, ETH_ALEN);
++
++	if (sic->bridged) {
++		memcpy(reply_cm->xmit_src_mac, sic->dest_mac_xlate, ETH_ALEN);
++	}
++	else {
++		if (memcmp(sic->dest_mac, null_macaddr, ETH_ALEN)) {
++  			memcpy(reply_cm->xmit_src_mac, sic->dest_mac, ETH_ALEN);
++		}
++		else {
++			memcpy(reply_cm->xmit_src_mac, src_dev->dev_addr, ETH_ALEN);
++		}
++	}
++
+ 	memcpy(reply_cm->xmit_dest_mac, sic->src_mac, ETH_ALEN);
+ 	reply_cm->connection = c;
+ 	reply_cm->counter_match = original_cm;
+@@ -2694,6 +2753,9 @@ int sfe_ipv6_create_rule(struct sfe_conn
+ 	c->reply_match = reply_cm;
+ 	c->mark = sic->mark;
+ 	c->debug_read_seq = 0;
++	c->bridged = sic->bridged;
++	memcpy(c->from_mac, sic->src_mac, ETH_ALEN);
++	memcpy(c->to_mac, sic->dest_mac_xlate, ETH_ALEN);
+ 	c->last_sync_jiffies = get_jiffies_64();
+ 
+ 	/*
+@@ -2816,6 +2878,55 @@ static ssize_t sfe_ipv6_get_debug_dev(st
+ 	return count;
+ }
+ 
++static void sfe_ipv6_destroy_all_rules_timeout(u64 now_jiffies)
++{
++	struct sfe_ipv6 *si = &__si6;
++	struct sfe_ipv6_connection *c;
++	struct sfe_ipv6_connection *next;
++	struct sfe_ipv6_connection *removed = NULL;
++	int flushed = 0;
++	static int trigger;
++
++#define FLUSH_TIME 1000   /* 10 seconds */
++#define STALL_TIME 300000 /* 300 seconds */
++
++	if (++trigger % FLUSH_TIME != 0) {
++		/* Flushing based on timeout is done every 10 seconds */
++		return;
++	}
++
++	spin_lock_bh(&si->lock);
++	next = si->all_connections_head;
++
++another_round:
++
++	for (c = next; c; c = c->all_connections_next) {
++		if (jiffies_to_msecs((unsigned long)(now_jiffies - c->last_sync_jiffies)) > STALL_TIME) {
++			break;
++		}
++	}
++
++	if (c) {
++		next = c->all_connections_next; /* c is modified below, so get next node early */
++		sfe_ipv6_remove_connection(si, c);
++		c->all_connections_next = removed;
++		removed = c;
++		goto another_round;
++	}
++
++	spin_unlock_bh(&si->lock);
++
++	for (c = removed; c; c = next) {
++		next = c->all_connections_next; /* c is freed below, so get next node early */
++		sfe_ipv6_flush_connection(si, c, SFE_SYNC_REASON_DESTROY);
++		flushed++;
++	}
++
++	if (flushed) {
++		printk("%s: flushed %d flows for due to timeout\n", __func__, flushed);
++	}
++}
++
+ /*
+  * sfe_ipv6_destroy_all_rules_for_dev()
+  *	Destroy all connections that match a particular device.
+@@ -2826,11 +2937,16 @@ void sfe_ipv6_destroy_all_rules_for_dev(
+ {
+ 	struct sfe_ipv6 *si = &__si6;
+ 	struct sfe_ipv6_connection *c;
++	struct sfe_ipv6_connection *next;
++	struct sfe_ipv6_connection *removed = NULL;
++	int flushed = 0;
+ 
+-another_round:
+ 	spin_lock_bh(&si->lock);
++	next = si->all_connections_head;
+ 
+-	for (c = si->all_connections_head; c; c = c->all_connections_next) {
++another_round:
++
++	for (c = next; c; c = c->all_connections_next) {
+ 		/*
+ 		 * Does this connection relate to the device we are destroying?
+ 		 */
+@@ -2842,17 +2958,78 @@ another_round:
+ 	}
+ 
+ 	if (c) {
++		next = c->all_connections_next; /* c is modified below, so get next node early */
+ 		sfe_ipv6_remove_connection(si, c);
++		c->all_connections_next = removed;
++		removed = c;
++		goto another_round;
+ 	}
+ 
+ 	spin_unlock_bh(&si->lock);
+ 
+-	if (c) {
++	for (c = removed; c; c = next) {
++		next = c->all_connections_next; /* c is freed below, so get next node early */
+ 		sfe_ipv6_flush_connection(si, c, SFE_SYNC_REASON_DESTROY);
++		flushed++;
++	}
++
++	if (flushed) {
++		printk("%s: flushed %d flows for dev=%s\n", __func__, flushed, dev ? dev->name : "all");
++	}
++}
++
++/*
++ * sfe_ipv6_destroy_all_rules_for_mac()
++ *	Destroy all connections that match a particular mac address.
++ *
++ * If we pass dev as NULL then this destroys all connections.
++ */
++void sfe_ipv6_destroy_all_rules_for_mac(u8 *mac_addr)
++{
++	struct sfe_ipv6 *si = &__si6;
++	struct sfe_ipv6_connection *c;
++	struct sfe_ipv6_connection *next;
++	struct sfe_ipv6_connection *removed = NULL;
++	int flushed = 0;
++
++	spin_lock_bh(&si->lock);
++	next = si->all_connections_head;
++
++another_round:
++
++	for (c = next; c; c = c->all_connections_next) {
++		/*
++		 * Does this connection relate to the mac address we are destroying?
++		 */
++		if (!mac_addr
++		    || (!memcmp(mac_addr, c->from_mac, ETH_ALEN))
++		    || (!memcmp(mac_addr, c->to_mac, ETH_ALEN))) {
++			break;
++		}
++	}
++
++	if (c) {
++		next = c->all_connections_next; /* c is modified below, so get next node early */
++		sfe_ipv6_remove_connection(si, c);
++		c->all_connections_next = removed;
++		removed = c;
+ 		goto another_round;
+ 	}
++
++	spin_unlock_bh(&si->lock);
++
++	for (c = removed; c; c = next) {
++		next = c->all_connections_next; /* c is freed below, so get next node early */
++		sfe_ipv6_flush_connection(si, c, SFE_SYNC_REASON_DESTROY);
++		flushed++;
++	}
++
++	if (flushed) {
++		printk("%s: flushed %d flows for mac=%pM\n", __func__, flushed, mac_addr);
++	}
+ }
+ 
++
+ /*
+  * sfe_ipv6_periodic_sync()
+  */
+@@ -2873,6 +3050,9 @@ static void sfe_ipv6_periodic_sync(struc
+ 
+ 	now_jiffies = get_jiffies_64();
+ 
++	/* check if any stall rules */
++	sfe_ipv6_destroy_all_rules_timeout(now_jiffies);
++
+ 	rcu_read_lock();
+ 	sync_rule_callback = rcu_dereference(si->sync_rule_callback);
+ 	if (!sync_rule_callback) {
+@@ -3090,11 +3270,14 @@ static bool sfe_ipv6_debug_dev_read_conn
+ 
+ 	bytes_read = snprintf(msg, CHAR_DEV_MSG_SIZE, "\t\t<connection "
+ 				"protocol=\"%u\" "
++				"bridged=\"%s\" "
++				"src_mac=\"%pM\" "
+ 				"src_dev=\"%s\" "
+ 				"src_ip=\"%pI6\" src_ip_xlate=\"%pI6\" "
+ 				"src_port=\"%u\" src_port_xlate=\"%u\" "
+ 				"src_priority=\"%u\" src_dscp=\"%u\" "
+ 				"src_rx_pkts=\"%llu\" src_rx_bytes=\"%llu\" "
++				"dest_mac_xlate=\"%pM\" "
+ 				"dest_dev=\"%s\" "
+ 				"dest_ip=\"%pI6\" dest_ip_xlate=\"%pI6\" "
+ 				"dest_port=\"%u\" dest_port_xlate=\"%u\" "
+@@ -3106,11 +3289,14 @@ static bool sfe_ipv6_debug_dev_read_conn
+ 				"last_sync=\"%llu\" "
+ 				"mark=\"%08x\" />\n",
+ 				protocol,
++				c->bridged ? "true" : "false",
++				c->from_mac,
+ 				src_dev->name,
+ 				&src_ip, &src_ip_xlate,
+ 				ntohs(src_port), ntohs(src_port_xlate),
+ 				src_priority, src_dscp,
+ 				src_rx_packets, src_rx_bytes,
++				c->to_mac,
+ 				dest_dev->name,
+ 				&dest_ip, &dest_ip_xlate,
+ 				ntohs(dest_port), ntohs(dest_port_xlate),
+@@ -3240,6 +3426,7 @@ static bool sfe_ipv6_debug_dev_read_stat
+ {
+ 	int bytes_read;
+ 	unsigned int num_connections;
++	unsigned int num_bridged;
+ 	u64 packets_forwarded;
+ 	u64 packets_not_forwarded;
+ 	u64 connection_create_requests;
+@@ -3254,6 +3441,7 @@ static bool sfe_ipv6_debug_dev_read_stat
+ 	sfe_ipv6_update_summary_stats(si);
+ 
+ 	num_connections = si->num_connections;
++	num_bridged = si->num_bridged;
+ 	packets_forwarded = si->packets_forwarded64;
+ 	packets_not_forwarded = si->packets_not_forwarded64;
+ 	connection_create_requests = si->connection_create_requests64;
+@@ -3266,13 +3454,14 @@ static bool sfe_ipv6_debug_dev_read_stat
+ 	spin_unlock_bh(&si->lock);
+ 
+ 	bytes_read = snprintf(msg, CHAR_DEV_MSG_SIZE, "\t<stats "
+-			      "num_connections=\"%u\" "
++			      "num_connections=\"%u\" num_bridged=\"%u\" "
+ 			      "pkts_forwarded=\"%llu\" pkts_not_forwarded=\"%llu\" "
+ 			      "create_requests=\"%llu\" create_collisions=\"%llu\" "
+ 			      "destroy_requests=\"%llu\" destroy_misses=\"%llu\" "
+ 			      "flushes=\"%llu\" "
+ 			      "hash_hits=\"%llu\" hash_reorders=\"%llu\" />\n",
+ 			      num_connections,
++			      num_bridged,
+ 			      packets_forwarded,
+ 			      packets_not_forwarded,
+ 			      connection_create_requests,
+@@ -3602,11 +3791,13 @@ module_exit(sfe_ipv6_exit)
+ 
+ EXPORT_SYMBOL(sfe_ipv6_recv);
+ EXPORT_SYMBOL(sfe_ipv6_create_rule);
++EXPORT_SYMBOL(sfe_ipv6_is_rule_existed);
+ EXPORT_SYMBOL(sfe_ipv6_destroy_rule);
+ EXPORT_SYMBOL(sfe_ipv6_destroy_all_rules_for_dev);
+ EXPORT_SYMBOL(sfe_ipv6_register_sync_rule_callback);
+ EXPORT_SYMBOL(sfe_ipv6_mark_rule);
+ EXPORT_SYMBOL(sfe_ipv6_update_rule);
++EXPORT_SYMBOL(sfe_ipv6_destroy_all_rules_for_mac);
+ #ifdef CONFIG_NF_FLOW_COOKIE
+ EXPORT_SYMBOL(sfe_ipv6_register_flow_cookie_cb);
+ EXPORT_SYMBOL(sfe_ipv6_unregister_flow_cookie_cb);
+Index: shortcut-fe-g2f1360d/shortcut-fe/sfe_cm.c
+===================================================================
+--- shortcut-fe-g2f1360d.orig/shortcut-fe/sfe_cm.c
++++ shortcut-fe-g2f1360d/shortcut-fe/sfe_cm.c
+@@ -410,6 +410,7 @@ static unsigned int sfe_cm_post_routing(
+ 	sic.protocol = (s32)orig_tuple.dst.protonum;
+ 
+ 	sic.flags = 0;
++	sic.bridged = false;
+ 
+ 	/*
+ 	 * Get addressing information, non-NAT first

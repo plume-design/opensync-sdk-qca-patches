@@ -1,0 +1,93 @@
+--- a/frontends/include/ecm_front_end_common.h
++++ b/frontends/include/ecm_front_end_common.h
+@@ -306,6 +306,30 @@ static inline bool ecm_front_end_destroy
+ 	return false;
+ }
+ 
++/*
++ * ecm_front_end_port_accel_allowed_ipv4()
++ *	Check if accelerating traffic with given ports is allowed.
++ */
++static inline bool ecm_front_end_port_accel_allowed_ipv4(int src_port, int src_port_nat, int dest_port, int dest_port_nat)
++{
++	if (src_port == 53 || src_port == 67) return false;
++	if (src_port_nat == 53 || src_port_nat == 67) return false;
++	if (dest_port == 53 || dest_port == 67) return false;
++	if (dest_port_nat == 53 || dest_port_nat == 67) return false;
++	return true;
++}
++
++/*
++ * ecm_front_end_port_accel_allowed_ipv6()
++ *	Check if accelerating traffic with given ports is allowed.
++ */
++static inline bool ecm_front_end_port_accel_allowed_ipv6(int src_port, int dest_port)
++{
++	if (src_port == 53 || src_port == 67) return false;
++	if (dest_port == 53 || dest_port == 67) return false;
++	return true;
++}
++
+ extern void ecm_front_end_bond_notifier_stop(int num);
+ extern int ecm_front_end_bond_notifier_init(struct dentry *dentry);
+ extern void ecm_front_end_bond_notifier_exit(void);
+--- a/frontends/sfe/ecm_sfe_ported_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv4.c
+@@ -2048,6 +2048,12 @@ unsigned int ecm_sfe_ported_ipv4_process
+ 		return NF_ACCEPT;
+ 	}
+ 
++	/* Check if given ports are allowed */
++	if (ecm_front_end_port_accel_allowed_ipv4(src_port, dest_port_nat, dest_port, src_port_nat) == false) {
++		DEBUG_TRACE("Denying acceleration as the given traffic port is disallowed.\n");
++		return NF_ACCEPT;
++	}
++
+ 	/*
+ 	 * Look up a connection
+ 	 */
+--- a/frontends/sfe/ecm_sfe_ported_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv6.c
+@@ -1958,6 +1958,12 @@ unsigned int ecm_sfe_ported_ipv6_process
+ 		return NF_ACCEPT;
+ 	}
+ 
++	/* Check if given ports are allowed */
++	if (ecm_front_end_port_accel_allowed_ipv6(src_port, dest_port) == false) {
++		DEBUG_TRACE("Denying acceleration as the given traffic port is disallowed.\n");
++		return NF_ACCEPT;
++	}
++
+ 	/*
+ 	 * Look up a connection
+ 	 */
+--- a/frontends/nss/ecm_nss_ported_ipv4.c
++++ b/frontends/nss/ecm_nss_ported_ipv4.c
+@@ -2294,6 +2294,12 @@ unsigned int ecm_nss_ported_ipv4_process
+ 		return NF_ACCEPT;
+ 	}
+ 
++	/* Check if given ports are allowed */
++	if (ecm_front_end_port_accel_allowed_ipv4(src_port, dest_port_nat, dest_port, src_port_nat) == false) {
++		DEBUG_TRACE("Denying acceleration as the given traffic port is disallowed.\n");
++		return NF_ACCEPT;
++	}
++
+ 	/*
+ 	 * Look up a connection
+ 	 */
+--- a/frontends/nss/ecm_nss_ported_ipv6.c
++++ b/frontends/nss/ecm_nss_ported_ipv6.c
+@@ -2175,6 +2175,12 @@ unsigned int ecm_nss_ported_ipv6_process
+ 		return NF_ACCEPT;
+ 	}
+ 
++	/* Check if given ports are allowed */
++	if (ecm_front_end_port_accel_allowed_ipv6(src_port, dest_port) == false) {
++		DEBUG_TRACE("Denying acceleration as the given traffic port is disallowed.\n");
++		return NF_ACCEPT;
++	}
++
+ 	/*
+ 	 * Look up a connection
+ 	 */

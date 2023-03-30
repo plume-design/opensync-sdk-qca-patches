@@ -1,0 +1,2303 @@
+--- a/ecm_interface.c
++++ b/ecm_interface.c
+@@ -2617,22 +2617,34 @@ static struct net_device *ecm_interface_
+ 								struct ecm_front_end_ovs_params *op)
+ {
+ 	struct ovsmgr_dp_flow flow;
+-	struct ovsmgr_dp_flow return_flow;
+-	struct net_device *dev;
++	struct ovsmgr_flow_info ofi;
++	struct nf_conn *ct;
++	enum ip_conntrack_info ctinfo;
++	enum ovsmgr_flow_status status;
+ 
+ 	memset(&flow, 0, sizeof(flow));
++	memset(&ofi, 0, sizeof(ofi));
+ 
+-	flow.indev = br_dev;
+-	flow.outdev = NULL;
+ 	flow.tuple.ip_version = ip_version;
+ 	flow.tuple.protocol = protocol;
+ 	flow.is_routed = is_routed;
++	flow.is_post_ovs = skb->ovs_first_ufid_len != 0;
+ 
+-	if (!smac) {
+-		ether_addr_copy(flow.smac, br_dev->dev_addr);
++	ct = nf_ct_get(skb, &ctinfo);
++	if (ct) {
++	    flow.ct_mark = ct->mark;
++	    flow.ct_zone = nf_ct_zone_id(nf_ct_zone(ct), CTINFO2DIR(ctinfo));
+ 	}
+ 
+-	ether_addr_copy(flow.dmac, dmac);
++	if (flow.is_post_ovs) {
++		flow.outdev = br_dev;
++		ether_addr_copy(flow.smac, dmac);
++		ether_addr_copy(flow.dmac, br_dev->dev_addr);
++	} else {
++		flow.indev = br_dev;
++		ether_addr_copy(flow.smac, br_dev->dev_addr);
++		ether_addr_copy(flow.dmac, dmac);
++	}
+ 
+ 	/*
+ 	 * Consider a routing flow
+@@ -2648,165 +2660,31 @@ static struct net_device *ecm_interface_
+ 	 * data path rule set.
+ 	 */
+ 	if (ecm_ip_addr_is_multicast(src_ip)) {
+-		struct ethhdr *skb_eth_hdr;
+-
+-		skb_eth_hdr = eth_hdr(skb);
+-		ether_addr_copy(flow.smac, dmac);
+-		ether_addr_copy(flow.dmac, skb_eth_hdr->h_dest);
+-
+-		if (protocol == IPPROTO_UDP) {
+-			struct udphdr *udp_hdr = (struct udphdr *)layer4hdr;
+-
+-			flow.tuple.src_port = udp_hdr->source;
+-			flow.tuple.dst_port = udp_hdr->dest;
+-		} else {
+-			DEBUG_WARN("%px: Protocol is not UDP\n", skb);
+-			return NULL;
+-		}
+-
+-		if (ip_version == 4) {
+-			ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.src, dst_ip);
+-			ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.dst, src_ip);
+-			DEBUG_TRACE("%px: br_dev: %s, src_addr: %pI4, dest_addr: %pI4, ip_version: %d, protocol: %d (sp:%d, dp:%d) (smac:%pM, dmac:%pM)\n",
+-					skb, br_dev->name, &flow.tuple.ipv4.src, &flow.tuple.ipv4.dst,
+-					ip_version, protocol, flow.tuple.src_port, flow.tuple.dst_port, flow.smac, flow.dmac);
+-		} else {
+-			ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.src, dst_ip);
+-			ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.dst, src_ip);
+-			DEBUG_TRACE("%px: br_dev: %s, src_addr: %pI6, dest_addr: %pI6, ip_version: %d, protocol: %d (sp:%d, dp:%d) (smac:%pM, dmac:%pM)\n",
+-					skb, br_dev->name, &flow.tuple.ipv6.src, &flow.tuple.ipv6.dst,
+-					ip_version, protocol, flow.tuple.src_port, flow.tuple.dst_port, flow.smac, flow.dmac);
+-		}
+-
+-		goto port_find;
+-	}
+-
+-	/*
+-	 * OVS parameters are not passed explicitly for the following cases:
+-	 * 1. IPv6 flows
+-	 * 2. IPv4/IPv6 non-ported flows
+-	 * 3. Multicast flows.
+-	 * 4. SFE flows
+-	 */
+-	if (!op) {
+-		if (protocol == IPPROTO_TCP) {
+-			struct tcphdr *tcp_hdr = (struct tcphdr *)layer4hdr;
+-
+-			flow.tuple.src_port = tcp_hdr->source;
+-			flow.tuple.dst_port = tcp_hdr->dest;
+-		} else if (protocol == IPPROTO_UDP) {
+-			struct udphdr *udp_hdr = (struct udphdr *)layer4hdr;
+-
+-			flow.tuple.src_port = udp_hdr->source;
+-			flow.tuple.dst_port = udp_hdr->dest;
+-		} else {
+-			DEBUG_WARN("%px: Protocol is not udp/tcp\n", skb);
+-			return NULL;
+-		}
+-
+-		if (ip_version == 4) {
+-			ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.src, src_ip);
+-			ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.dst, dst_ip);
+-			DEBUG_TRACE("%px: br_dev: %s, src_addr: %pI4, dest_addr: %pI4, ip_version: %d, protocol: %d (sp:%d, dp:%d) (smac:%pM, dmac:%pM)\n",
+-					skb, br_dev->name, &flow.tuple.ipv4.src, &flow.tuple.ipv4.dst,
+-					ip_version, protocol, flow.tuple.src_port, flow.tuple.dst_port, flow.smac, flow.dmac);
+-		} else {
+-			ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.src, src_ip);
+-			ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.dst, dst_ip);
+-			DEBUG_TRACE("%px: br_dev: %s, src_addr: %pI6, dest_addr: %pI6, ip_version: %d, protocol: %d (sp:%d, dp:%d) (smac:%pM, dmac:%pM)\n",
+-					skb, br_dev->name, &flow.tuple.ipv6.src, &flow.tuple.ipv6.dst,
+-					ip_version, protocol, flow.tuple.src_port, flow.tuple.dst_port, flow.smac, flow.dmac);
+-		}
+-
+-		goto port_find;
++		DEBUG_ERROR("Detected multicast address during OVS hierarchy construction\n");
+ 	}
+ 
+-	/*
+-	 * We use OVS params for IPv4 NSS unicast flows.
+-	 */
+-	if ((protocol == IPPROTO_TCP) || (protocol == IPPROTO_UDP)) {
+-		flow.tuple.src_port = htons(op->src_port);
+-		flow.tuple.dst_port = htons(op->dest_port);
+-	} else {
+-		DEBUG_WARN("%px: Protocol is not udp/tcp\n", skb);
++	status = ovsmgr_flow_info_get(&flow, skb, &ofi);
++	if (status == OVSMGR_FLOW_STATUS_DENY_ACCEL) {
+ 		return NULL;
+ 	}
+ 
+-	if (ip_version == 4) {
+-		ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.src, op->src_ip);
+-		ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.dst, op->dest_ip);
+-		DEBUG_TRACE("%px: br_dev: %s, src_addr: %pI4, dest_addr: %pI4, ip_version: %d, protocol: %d (sp:%d, dp:%d) (smac:%pM, dmac:%pM)\n",
+-				skb, br_dev->name, &flow.tuple.ipv4.src, &flow.tuple.ipv4.dst,
+-				ip_version, protocol, flow.tuple.src_port, flow.tuple.dst_port, flow.smac, flow.dmac);
+-	} else {
+-		ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.src, op->src_ip);
+-		ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.dst, op->dest_ip);
+-		DEBUG_TRACE("%px: br_dev: %s, src_addr: %pI6, dest_addr: %pI6, ip_version: %d, protocol: %d (sp:%d, dp:%d) (smac:%pM, dmac:%pM)\n",
+-				skb, br_dev->name, &flow.tuple.ipv6.src, &flow.tuple.ipv6.dst,
+-				ip_version, protocol, flow.tuple.src_port, flow.tuple.dst_port, flow.smac, flow.dmac);
+-	}
+-
+-port_find:
+-	dev = ovsmgr_port_find(skb, br_dev, &flow);
+-	if (dev) {
+-		DEBUG_TRACE("OVS egress port dev: %s\n", dev->name);
+-		dev_hold(dev);
+-		return dev;
+-	}
+-
+-	/*
+-	 * Handle Multicast flows separately.
+-	 */
+-	if (ecm_ip_addr_is_multicast(src_ip)) {
+-		dev = ovsmgr_port_find_by_mac(skb, br_dev, &flow);
+-		if (!dev) {
+-			DEBUG_WARN("%px: Couldn't find OVS bridge port for Multicast flow.\n", skb);
+-			return NULL;
++	if (flow.is_post_ovs) {
++		if (flow.indev) {
++			DEBUG_TRACE("OVS is_post_ovs TRUE port dev: %s\n", flow.indev->name);
++			dev_hold(flow.indev);
++			return flow.indev;
+ 		}
+ 
+-		dev_hold(dev);
+-		return dev;
+-	}
+-
+-	/*
+-	 * Find by MAC addresses using return flow
+-	 */
+-	return_flow.indev = NULL;
+-	return_flow.outdev = br_dev;
+-	return_flow.tuple.ip_version = flow.tuple.ip_version;
+-	return_flow.tuple.protocol = flow.tuple.protocol;
+-	return_flow.is_routed = flow.is_routed;
+-
+-	ether_addr_copy(return_flow.smac, flow.dmac);
+-	ether_addr_copy(return_flow.dmac, flow.smac);
+-	return_flow.tuple.src_port = flow.tuple.dst_port;
+-	return_flow.tuple.dst_port = flow.tuple.src_port;
+-	if (ip_version == 4) {
+-		return_flow.tuple.ipv4.src = flow.tuple.ipv4.dst;
+-		return_flow.tuple.ipv4.dst = flow.tuple.ipv4.src;
+-		DEBUG_TRACE("%px: br_dev = %s, src_addr: %pI4, dest_addr: %pI4, ip_version: %d, protocol: %d (sp:%d, dp:%d) (smac:%pM, dmac:%pM)\n",
+-				skb, br_dev->name, &return_flow.tuple.ipv4.src,
+-				&return_flow.tuple.ipv4.dst, return_flow.tuple.ip_version,
+-				return_flow.tuple.protocol, return_flow.tuple.src_port, return_flow.tuple.dst_port,
+-				return_flow.smac, return_flow.dmac);
+-	} else {
+-		memcpy(&return_flow.tuple.ipv6.src, &flow.tuple.ipv6.dst, sizeof(return_flow.tuple.ipv6.src));
+-		memcpy(&return_flow.tuple.ipv6.dst, &flow.tuple.ipv6.src, sizeof(return_flow.tuple.ipv6.dst));
+-		DEBUG_TRACE("%px: br_dev = %s, src_addr: %pI6, dest_addr: %pI6, ip_version: %d, protocol: %d (sp:%d, dp:%d) (smac:%pM, dmac:%pM)\n",
+-				skb, br_dev->name, &return_flow.tuple.ipv4.src,
+-				&return_flow.tuple.ipv4.dst, return_flow.tuple.ip_version,
+-				return_flow.tuple.protocol, return_flow.tuple.src_port, return_flow.tuple.dst_port,
+-				return_flow.smac, return_flow.dmac);
++		return NULL;
+ 	}
+ 
+-	dev = ovsmgr_port_find_by_mac(skb, br_dev, &return_flow);
+-	if (!dev) {
+-		DEBUG_WARN("%px: Couldn't find OVS bridge port\n", skb);
+-		return NULL;
++	if (flow.outdev) {
++		DEBUG_TRACE("OVS is_post_ovs FALSE port dev: %s\n", flow.outdev->name);
++		dev_hold(flow.outdev);
++		return flow.outdev;
+ 	}
+ 
+-	dev_hold(dev);
+-	return dev;
++	return NULL;
+ }
+ #endif
+ 
+@@ -7830,7 +7708,8 @@ static void ecm_interface_ovs_defunct_ma
+ 		ecm_db_node_ovs_connections_masked_defunct(flow->tuple.ip_version, flow->smac, true, src_addr,
+ 							   ntohs(flow->tuple.src_port), flow->dmac, false, dest_addr,
+ 							   ntohs(flow->tuple.dst_port), flow->tuple.protocol,
+-							   ECM_DB_OBJ_DIR_FROM, true);
++							   ECM_DB_OBJ_DIR_FROM, true,
++							   flow->ufid.ufid_len, flow->ufid.ufid);
+ 		return;
+ 	}
+ 
+@@ -7850,7 +7729,8 @@ static void ecm_interface_ovs_defunct_ma
+ 		ecm_db_node_ovs_connections_masked_defunct(flow->tuple.ip_version, flow->smac, false, src_addr,
+ 							   ntohs(flow->tuple.src_port), flow->dmac, true, dest_addr,
+ 							   ntohs(flow->tuple.dst_port), flow->tuple.protocol,
+-							   ECM_DB_OBJ_DIR_TO, true);
++							   ECM_DB_OBJ_DIR_TO, true,
++							   flow->ufid.ufid_len, flow->ufid.ufid);
+ 
+ 		return;
+ 	}
+@@ -7875,7 +7755,8 @@ static void ecm_interface_ovs_defunct_ma
+ 							   ntohs(flow->tuple.src_port), flow->dmac,
+ 							   dmac_valid, dest_addr,
+ 							   ntohs(flow->tuple.dst_port), flow->tuple.protocol,
+-							   ECM_DB_OBJ_DIR_FROM, false);
++							   ECM_DB_OBJ_DIR_FROM, false,
++							   flow->ufid.ufid_len, flow->ufid.ufid);
+ 		return;
+ 	}
+ 
+@@ -7891,7 +7772,8 @@ static void ecm_interface_ovs_defunct_ma
+ 		ecm_db_node_ovs_connections_masked_defunct(flow->tuple.ip_version, flow->smac, false, src_addr,
+ 							   ntohs(flow->tuple.src_port), flow->dmac, true,  dest_addr,
+ 							   ntohs(flow->tuple.dst_port), flow->tuple.protocol,
+-							   ECM_DB_OBJ_DIR_TO, false);
++							   ECM_DB_OBJ_DIR_TO, false,
++							   flow->ufid.ufid_len, flow->ufid.ufid);
+ 
+ 		return;
+ 	}
+--- a/ecm_classifier_ovs.c
++++ b/ecm_classifier_ovs.c
+@@ -32,6 +32,8 @@
+ #include <linux/ctype.h>
+ #include <net/tcp.h>
+ #include <net/ipv6.h>
++#include <net/netfilter/nf_conntrack.h>
++#include <net/netfilter/nf_conntrack_zones.h>
+ #include <linux/inet.h>
+ #include <linux/in.h>
+ #include <linux/etherdevice.h>
+@@ -59,7 +61,6 @@
+ #include "ecm_tracker_tcp.h"
+ #include "ecm_db.h"
+ #include "ecm_classifier_ovs.h"
+-#include "ecm_classifier_ovs_public.h"
+ #include "ecm_front_end_common.h"
+ #include "ecm_front_end_ipv4.h"
+ #ifdef ECM_IPV6_ENABLE
+@@ -72,6 +73,11 @@
+  */
+ #define ECM_CLASSIFIER_OVS_INSTANCE_MAGIC 0x2568
+ 
++struct ovs_flow_info {
++	uint16_t in_port;
++	struct ovsmgr_flow_ufid ufid;
++};
++
+ /*
+  * struct ecm_classifier_ovs_instance
+  * 	State per connection for OVS classifier
+@@ -87,6 +93,11 @@ struct ecm_classifier_ovs_instance {
+ 	struct ecm_classifier_process_response process_response;
+ 								/* Last process response computed */
+ 	int refs;						/* Integer to trap we never go negative */
++
++	bool src_flow_acquired;
++	bool dst_flow_acquired;
++	struct ovs_flow_info src_flow;
++	struct ovs_flow_info dst_flow;
+ #if (DEBUG_LEVEL > 0)
+ 	uint16_t magic;
+ #endif
+@@ -120,11 +131,6 @@ static struct ecm_classifier_ovs_instanc
+ static int ecm_classifier_ovs_count = 0;			/* Tracks number of instances allocated */
+ 
+ /*
+- * Callback object.
+- */
+-static struct ecm_classifier_ovs_callbacks ovs;
+-
+-/*
+  * ecm_classifier_ovs_ref()
+  *	Ref
+  */
+@@ -245,6 +251,158 @@ static inline struct net_device *ecm_cla
+ 	return NULL;
+ }
+ 
++int ecm_classifier_ovs_flow_find(struct ovsmgr_dp_flow *flow, struct sk_buff *skb,
++				 struct ecm_classifier_ovs_instance *ecvi,
++				 ecm_tracker_sender_type_t sender)
++{
++	struct ovsmgr_flow_info ofi;
++	struct nf_conn *ct;
++	enum ip_conntrack_info ctinfo;
++	enum ovsmgr_flow_status result;
++	uint8_t tos;
++
++	flow->is_post_ovs = skb->ovs_first_ufid_len != 0;
++	flow->deny_skip_accel = true;
++
++	ct = nf_ct_get(skb, &ctinfo);
++	if (ct) {
++	    flow->ct_mark = ct->mark;
++	    flow->ct_zone = nf_ct_zone_id(nf_ct_zone(ct), CTINFO2DIR(ctinfo));
++	}
++
++	/* Lookup OVS flow */
++	memset(&ofi, 0, sizeof(ofi));
++	ofi.dscp = OVSMGR_INVALID_DSCP;
++	result = ovsmgr_flow_info_get(flow, skb, &ofi);
++
++	spin_lock_bh(&ecm_classifier_ovs_lock);
++
++	/* If associated OVS flow wasn't found, we are done */
++	if (result == OVSMGR_FLOW_STATUS_DENY_ACCEL) {
++		/* Trying to prevent data race... */
++		if (sender == ECM_TRACKER_SENDER_TYPE_SRC && ecvi->src_flow_acquired == true) {
++			DEBUG_TRACE("Reusing SRC flow\n");
++			goto flow_acquired;
++		}
++		if (sender == ECM_TRACKER_SENDER_TYPE_DEST && ecvi->dst_flow_acquired == true) {
++			DEBUG_TRACE("Reusing DST flow\n");
++			goto flow_acquired;
++		}
++		spin_unlock_bh(&ecm_classifier_ovs_lock);
++
++		return -1;
++	}
++
++	/* Reset VLAN info */
++	ecvi->process_response.ingress_vlan_tag[0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
++	ecvi->process_response.egress_vlan_tag[0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
++	ecvi->process_response.ingress_vlan_tag[1] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
++	ecvi->process_response.egress_vlan_tag[1] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
++
++	if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
++		ecvi->src_flow_acquired = true;
++		ecvi->src_flow.in_port = ofi.in_port;
++		ecvi->src_flow.ufid = ofi.ufid;
++	} else {
++		ecvi->dst_flow_acquired = true;
++		ecvi->dst_flow.in_port = ofi.in_port;
++		ecvi->dst_flow.ufid = ofi.ufid;
++	}
++
++	/* Check for VLAN info */
++	if (result == OVSMGR_FLOW_STATUS_ALLOW_VLAN_ACCEL || result == OVSMGR_FLOW_STATUS_ALLOW_VLAN_QINQ_ACCEL) {
++
++		if (ofi.ingress[0].h_vlan_TCI) {
++			if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
++				ecvi->process_response.ingress_vlan_tag[0] = ofi.ingress[0].h_vlan_encapsulated_proto << 16 | ofi.ingress[0].h_vlan_TCI;
++			} else {
++				ecvi->process_response.egress_vlan_tag[0] = ofi.ingress[0].h_vlan_encapsulated_proto << 16 | ofi.ingress[0].h_vlan_TCI;
++			}
++		}
++
++		if (ofi.egress[0].h_vlan_TCI) {
++			if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
++				ecvi->process_response.egress_vlan_tag[0] = ofi.egress[0].h_vlan_encapsulated_proto << 16 | ofi.egress[0].h_vlan_TCI;
++			} else {
++				ecvi->process_response.ingress_vlan_tag[0] = ofi.egress[0].h_vlan_encapsulated_proto << 16 | ofi.egress[0].h_vlan_TCI;
++			}
++		}
++
++		ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_TAG;
++
++		if (result == OVSMGR_FLOW_STATUS_ALLOW_VLAN_QINQ_ACCEL) {
++			if (ofi.ingress[1].h_vlan_TCI) {
++				if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
++					ecvi->process_response.ingress_vlan_tag[1] = ofi.ingress[1].h_vlan_encapsulated_proto << 16 | ofi.ingress[1].h_vlan_TCI;
++				} else {
++					ecvi->process_response.egress_vlan_tag[1] = ofi.ingress[1].h_vlan_encapsulated_proto << 16 | ofi.ingress[1].h_vlan_TCI;
++				}
++			}
++
++			if (ofi.egress[1].h_vlan_TCI) {
++				if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
++					ecvi->process_response.egress_vlan_tag[1] = ofi.egress[1].h_vlan_encapsulated_proto << 16 | ofi.egress[1].h_vlan_TCI;
++				} else {
++					ecvi->process_response.ingress_vlan_tag[1] = ofi.egress[1].h_vlan_encapsulated_proto << 16 | ofi.egress[1].h_vlan_TCI;
++				}
++			}
++
++			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_QINQ_TAG;
++		}
++	}
++
++	/* Parse DSCP from SKB */
++	if (flow->tuple.ip_version == 4) {
++		struct iphdr *nh = ip_hdr(skb);
++		tos = nh->tos >> XT_DSCP_SHIFT;
++	} else {
++		struct ipv6hdr *nh = ipv6_hdr(skb);
++		tos = ipv6_get_dsfield(nh) >> XT_DSCP_SHIFT;
++	}
++	if (tos) {
++		if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
++			ecvi->process_response.flow_dscp = tos;
++		} else {
++			ecvi->process_response.return_dscp = tos;
++		}
++		ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_DSCP;
++	}
++
++	/* Check for DSCP remarking */
++	if (ofi.dscp != OVSMGR_INVALID_DSCP) {
++		if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
++			ecvi->process_response.flow_dscp = ofi.dscp >> XT_DSCP_SHIFT;
++		} else {
++			ecvi->process_response.return_dscp = ofi.dscp >> XT_DSCP_SHIFT;
++		}
++		ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_DSCP;
++	}
++
++flow_acquired:
++	/* Only allow TCP acceleration once we have seen both sides of traffic */
++	if (flow->tuple.protocol == 6 &&
++	   (ecvi->src_flow_acquired == false ||
++	    ecvi->dst_flow_acquired == false)) {
++		DEBUG_TRACE("Denying TCP acceleration until both flow sides have been processed\n");
++
++		spin_unlock_bh(&ecm_classifier_ovs_lock);
++		return -1;
++	}
++	spin_unlock_bh(&ecm_classifier_ovs_lock);
++
++	DEBUG_TRACE("Flow found and processed\n");
++
++	return 0;
++}
++
++/*
++ * Missing functionality to be on par with QCA (but better):
++ * - multicast flows can have multiple outputs with each port having different VLAN
++ *   both input and output ports are known here so we can give this info to OVSMGR
++ * - QinQ support (should be quick)
++ * - Deny egress port acceleration
++ */
++
+ #ifdef ECM_MULTICAST_ENABLE
+ /*
+  * ecm_classifier_ovs_process_multicast()
+@@ -252,19 +410,16 @@ static inline struct net_device *ecm_cla
+  */
+ static void ecm_classifier_ovs_process_multicast(struct ecm_db_connection_instance *ci, struct sk_buff *skb,
+ 							struct ecm_classifier_ovs_instance *ecvi,
+-							struct ecm_classifier_process_response *process_response)
++							struct ecm_classifier_process_response *process_response,
++							ecm_tracker_sender_type_t sender)
+ {
+-	struct ecm_classifier_ovs_process_response resp;
+-	ecm_classifier_ovs_process_callback_t cb;
+ 	struct ecm_db_iface_instance *to_mc_ifaces;
+-	struct net_device *from_dev = NULL, *indev_master = NULL;
+ 	struct net_device *to_dev[ECM_DB_MULTICAST_IF_MAX] = {NULL};
+ 	struct ovsmgr_dp_flow flow;
+-	ip_addr_t src_ip;
+-	ip_addr_t dst_ip;
+ 	int32_t *to_mc_ifaces_first;
+ 	int if_cnt, i;
+ 	bool valid_ovs_ports = false;
++	int error;
+ 
+ 	/*
+ 	 * Classifier is always relevant for multicast
+@@ -326,8 +481,7 @@ static void ecm_classifier_ovs_process_m
+ 	}
+ 	ecm_db_multicast_connection_to_interfaces_deref_all(to_mc_ifaces, to_mc_ifaces_first);
+ 
+-	from_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_FROM, true);
+-	if (!from_dev && !valid_ovs_ports) {
++	if (!valid_ovs_ports) {
+ 		spin_lock_bh(&ecm_classifier_ovs_lock);
+ 		*process_response = ecvi->process_response;
+ 		spin_unlock_bh(&ecm_classifier_ovs_lock);
+@@ -354,144 +508,17 @@ static void ecm_classifier_ovs_process_m
+ 	 * 	a. sender: eth1, receiver: eth0, eth2
+ 	 */
+ 
+-	/*
+-	 * Is there an external callback to get the ovs value from the packet?
+-	 */
+-	spin_lock_bh(&ecm_classifier_ovs_lock);
+-	cb = ovs.ovs_process;
+-	if (!cb) {
+-		/*
+-		 * Allow acceleration.
+-		 * Keep the classifier relevant to connection for stats update..
+-		 */
+-		spin_unlock_bh(&ecm_classifier_ovs_lock);
+-		DEBUG_WARN("%px: No external process callback set\n", ci);
+-		goto allow_accel;
+-	}
+-	spin_unlock_bh(&ecm_classifier_ovs_lock);
+-
+ 	memset(&flow, 0, sizeof(struct ovsmgr_dp_flow));
+ 
+-	if (from_dev) {
+-		flow.indev = from_dev;
+-		indev_master = ovsmgr_dev_get_master(flow.indev);
+-		DEBUG_ASSERT(indev_master, "%px: Expected a master\n", ci);
+-	}
+-
+ 	flow.is_routed = ecm_db_connection_is_routed_get(ci);
+ 	flow.tuple.ip_version = ecm_db_connection_ip_version_get(ci);
+ 	flow.tuple.protocol = ecm_db_connection_protocol_get(ci);
+ 	flow.tuple.src_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+ 	flow.tuple.dst_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
++	flow.is_mcast = true;
+ 
+ 	ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, flow.smac);
+ 	ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, flow.dmac);
+-	ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, src_ip);
+-	ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
+-
+-	if (flow.tuple.ip_version == 4) {
+-		ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.src, src_ip);
+-		ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.dst, dst_ip);
+-	} else if (flow.tuple.ip_version == 6) {
+-		ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.src, src_ip);
+-		ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.dst, dst_ip);
+-	} else {
+-		DEBUG_ASSERT(NULL, "%px: unexpected ip_version: %d", ci, flow.tuple.ip_version );
+-	}
+-
+-	/*
+-	 * Check if the connection is a "bridge + route"
+-	 * flow.
+-	 */
+-	if (flow.is_routed) {
+-		/*
+-		 * Get the ingress VLAN information from ovs-mgr
+-		 */
+-		if (from_dev) {
+-			struct net_device *br_dev;
+-			ecm_classifier_ovs_result_t result;
+-
+-			/*
+-			 * from_dev = eth1
+-			 * br_dev = ovs-br1
+-			 */
+-			br_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_FROM, false);
+-			DEBUG_TRACE("%px: processing route flow from_dev = %s, br_dev = %s", ecvi, from_dev->name, br_dev->name);
+-
+-			/*
+-			 * We always take the flow from bridge to port, so indev is port device and outdev is bridge device.
+-			 */
+-			flow.indev = from_dev;
+-			flow.outdev = br_dev;
+-
+-			DEBUG_TRACE("%px: Route Flow Process (from): src MAC: %pM src_dev: %s src: %pI4:%d proto: %d dest: %pI4:%d dest_dev: %s dest MAC: %pM\n",
+-					&flow, flow.smac, flow.indev->name, &flow.tuple.ipv4.src, flow.tuple.src_port, flow.tuple.protocol,
+-					&flow.tuple.ipv4.dst, flow.tuple.dst_port, flow.outdev->name, flow.dmac);
+-
+-			memset(&resp, 0, sizeof(struct ecm_classifier_ovs_process_response));
+-
+-			/*
+-			 * Call the external callback and get the result.
+-			 */
+-			result = cb(&flow, skb, &resp);
+-
+-			dev_put(br_dev);
+-
+-			/*
+-			 * Handle the result
+-			 */
+-			switch (result) {
+-			case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_ACCEL:
+-			case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL:
+-				/*
+-				 * Allow accel after setting the external module response.
+-				 */
+-				DEBUG_WARN("%px: External callback process succeeded\n", ecvi);
+-				spin_lock_bh(&ecm_classifier_ovs_lock);
+-				ecvi->process_response.ingress_vlan_tag[0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+-				ecvi->process_response.ingress_vlan_tag[1] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+-				if (resp.egress_vlan[0].h_vlan_TCI) {
+-					ecvi->process_response.ingress_vlan_tag[0] = resp.egress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[0].h_vlan_TCI;
+-				}
+-
+-				ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_TAG;
+-				if (result == ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL) {
+-					if (resp.egress_vlan[1].h_vlan_TCI) {
+-						ecvi->process_response.ingress_vlan_tag[1] = resp.egress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[1].h_vlan_TCI;
+-					}
+-
+-					ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_QINQ_TAG;
+-				}
+-				spin_unlock_bh(&ecm_classifier_ovs_lock);
+-				DEBUG_TRACE("%px: Multicast ingress vlan tag[0]: %x tag[1]: %x\n", ecvi, ecvi->process_response.ingress_vlan_tag[0],
+-						ecvi->process_response.ingress_vlan_tag[1]);
+-				break;
+-
+-			case ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL:
+-				/*
+-				 * External callback failed to process VLAN process. So, let's deny the acceleration
+-				 * and try more with the subsequent packets.
+-				 */
+-				DEBUG_WARN("%px: External callback failed to process VLAN tags\n", ecvi);
+-				spin_lock_bh(&ecm_classifier_ovs_lock);
+-				ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_MCAST_DENY_ACCEL;
+-				ecvi->process_response.accel_mode = ECM_CLASSIFIER_ACCELERATION_MODE_NO;
+-				*process_response = ecvi->process_response;
+-				spin_unlock_bh(&ecm_classifier_ovs_lock);
+-				goto done;
+-
+-			case ECM_CLASSIFIER_OVS_RESULT_ALLOW_ACCEL:
+-				/*
+-				 * There is no VLAN tag in the flow. Just allow the acceleration.
+-				 */
+-				DEBUG_WARN("%px: External callback didn't find any VLAN relation\n", ecvi);
+-				break;
+-
+-			default:
+-				DEBUG_ASSERT(false, "%px: Unhandled result: %d\n", ci, result);
+-			}
+-		}
+-	}
+ 
+ 	/*
+ 	 * During multicast update path, skb is passed as NULL.
+@@ -508,8 +535,6 @@ static void ecm_classifier_ovs_process_m
+ 	 * Call the external callback and get the result.
+ 	 */
+ 	for (i = 0; i < ECM_DB_MULTICAST_IF_MAX; i++) {
+-		ecm_classifier_ovs_result_t result = 0;
+-
+ 		if (!to_dev[i]) {
+ 			continue;
+ 		}
+@@ -521,110 +546,45 @@ static void ecm_classifier_ovs_process_m
+ 		 * corresponding port.
+ 		 */
+ 		if (flow.is_routed) {
+-			struct net_device *outdev_master;
+-
+-			/*
+-			 * During bridge+route scenario, the indev can be
+-			 * an ovs bridge port or and ovs bridge. if master device
+-			 * for indev and outdev are same then it a bridged traffic.
+-			 * Otherwise, set the indev to master of the egress port.
+-			 */
+-			outdev_master = ovsmgr_dev_get_master(flow.outdev);
++			struct net_device *outdev_master = ovsmgr_dev_get_master(flow.outdev);
+ 			DEBUG_ASSERT(outdev_master, "%px: Expected a master\n", ci);
+-			if (indev_master && (indev_master->ifindex == outdev_master->ifindex)) {
+-				flow.indev = from_dev;
+-				ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, flow.smac);
+-			} else {
+-				flow.indev = outdev_master;
+-				ether_addr_copy(flow.smac, flow.indev->dev_addr);
+-			}
++
++			flow.indev = outdev_master;
++			ether_addr_copy(flow.smac, flow.indev->dev_addr);
+ 		}
+ 
+ 		DEBUG_TRACE("%px: src MAC: %pM src_dev: %s src: %pI4:%d proto: %d dest: %pI4:%d dest_dev: %s dest MAC: %pM\n",
+ 				ci, flow.smac, flow.indev->name, &flow.tuple.ipv4.src, flow.tuple.src_port, flow.tuple.protocol,
+ 				&flow.tuple.ipv4.dst, flow.tuple.dst_port, flow.outdev->name, flow.dmac);
+ 
+-		memset(&resp, 0, sizeof(struct ecm_classifier_ovs_process_response));
+-		result = cb(&flow, skb, &resp);
++		error = ecm_classifier_ovs_flow_find(&flow, skb, ecvi, sender);
+ 
+-		switch(result) {
+-		case ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL_EGRESS:
+-			DEBUG_TRACE("%px: %s is not a valid OVS port\n", ci, to_dev[i]->name);
+-			ecm_db_multicast_connection_to_interfaces_clear_at_index(ci, i);
+-			break;
+-
+-		case ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL:
+-			/*
+-			 * If we receive "ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL"
+-			 * for any of the OVS port, then the connection should be
+-			 * deleted.
+-			 */
+-			DEBUG_TRACE("%px: flow does not exist for the OVS port: %s\n", ci, to_dev[i]->name);
++		/* If skip_accel, only postpone allow/deny */
++		if (error) {
+ 			spin_lock_bh(&ecm_classifier_ovs_lock);
+-			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_MCAST_DENY_ACCEL;
++			ecvi->process_response.process_actions = ECM_CLASSIFIER_PROCESS_ACTION_ACCEL_MODE;
+ 			ecvi->process_response.accel_mode = ECM_CLASSIFIER_ACCELERATION_MODE_NO;
+ 			*process_response = ecvi->process_response;
+ 			spin_unlock_bh(&ecm_classifier_ovs_lock);
++			DEBUG_TRACE("OVSMGR denied multicast accel\n");
+ 			goto done;
++		}
+ 
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_ACCEL:
+-			DEBUG_TRACE("%px: Acceleration allowed for multicast OVS port: %s\n", ci, to_dev[i]->name);
+-			break;
+-
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_ACCEL:
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL:
+-			/*
+-			 * Allow accel after setting the external module response.
+-			 * Primary VLAN tag is always present even it is QinQ.
+-			 */
+-			DEBUG_WARN("%px: External callback process succeeded\n", ci);
+-
+-			/*
+-			 * Initialize the VLAN entries since the ports can join/leave
+-			 * in-between and that will change the position of an existing port
+-			 * in the "egress_mc_vlan_tag" array.
+-			 */
+-			spin_lock_bh(&ecm_classifier_ovs_lock);
+-			ecvi->process_response.egress_mc_vlan_tag[i][0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+-			ecvi->process_response.egress_mc_vlan_tag[i][1] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+-			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_TAG;
+-			ecvi->process_response.egress_netdev_index[i] = flow.outdev->ifindex;
+-
+-			/*
+-			 * If we have a valid TCI for ingress VLAN then we assume
+-			 * the flow is bridged. Because for routed flows, ingress VLAN
+-			 * will not be available.
+-			 */
+-			if (resp.ingress_vlan[0].h_vlan_TCI) {
+-				ecvi->process_response.ingress_vlan_tag[0] = resp.ingress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.ingress_vlan[0].h_vlan_TCI;
+-			}
+-
+-			if (resp.egress_vlan[0].h_vlan_TCI) {
+-				ecvi->process_response.egress_mc_vlan_tag[i][0] = resp.egress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[0].h_vlan_TCI;
+-			}
+-
+-			if (result == ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL) {
+-				if (resp.ingress_vlan[1].h_vlan_TCI) {
+-					ecvi->process_response.ingress_vlan_tag[1] = resp.ingress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.ingress_vlan[1].h_vlan_TCI;
+-				}
+-
+-				if (resp.egress_vlan[1].h_vlan_TCI) {
+-					ecvi->process_response.egress_mc_vlan_tag[i][1] = resp.egress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[1].h_vlan_TCI;
+-				}
+-
+-				ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_QINQ_TAG;
+-			}
+-
+-			spin_unlock_bh(&ecm_classifier_ovs_lock);
+-			DEBUG_TRACE("%px: Multicast ingress vlan tag[0] : 0x%x tag[1] : 0x%x\n", ci, ecvi->process_response.ingress_vlan_tag[0],
+-					ecvi->process_response.ingress_vlan_tag[1]);
+-			DEBUG_TRACE("%px: Multicast egress vlan tag[%d][0] : 0x%x tag[%d][1] : 0x%x\n", ci, i, ecvi->process_response.egress_mc_vlan_tag[i][0],
+-					i, ecvi->process_response.egress_mc_vlan_tag[i][1]);
+-			break;
++		/*
++		 * Initialize the VLAN entries since the ports can join/leave
++		 * in between and that will change the position of an existing port
++		 * in the "egress_mc_vlan_tag" array.
++		 */
++		spin_lock_bh(&ecm_classifier_ovs_lock);
++		ecvi->process_response.egress_netdev_index[i] = flow.outdev->ifindex;
++		ecvi->process_response.egress_mc_vlan_tag[i][0] = ecvi->process_response.egress_vlan_tag[0];
++		ecvi->process_response.egress_mc_vlan_tag[i][1] = ecvi->process_response.egress_vlan_tag[1];
++		spin_unlock_bh(&ecm_classifier_ovs_lock);
+ 
+-		default:
+-			DEBUG_ASSERT(false, "Unhandled result: %d\n", result);
+-		}
++		DEBUG_TRACE("%px: Multicast ingress vlan tag[0] : 0x%x tag[1] : 0x%x\n", ci, ecvi->process_response.ingress_vlan_tag[0],
++				ecvi->process_response.ingress_vlan_tag[1]);
++		DEBUG_TRACE("%px: Multicast egress vlan tag[%d][0] : 0x%x tag[%d][1] : 0x%x\n", ci, i, ecvi->process_response.egress_mc_vlan_tag[i][0],
++				i, ecvi->process_response.egress_mc_vlan_tag[i][1]);
+ 	}
+ 
+ 	/*
+@@ -643,7 +603,6 @@ static void ecm_classifier_ovs_process_m
+ 		goto done;
+ 	}
+ 
+-allow_accel:
+ 	spin_lock_bh(&ecm_classifier_ovs_lock);
+ 	ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_ACCEL_MODE;
+ 	ecvi->process_response.accel_mode = ECM_CLASSIFIER_ACCELERATION_MODE_ACCEL;
+@@ -651,9 +610,6 @@ allow_accel:
+ 	spin_unlock_bh(&ecm_classifier_ovs_lock);
+ 
+ done:
+-	if (from_dev)
+-		dev_put(from_dev);
+-
+ 	/*
+ 	 * Deref the ovs net devices
+ 	 */
+@@ -676,13 +632,11 @@ done:
+ static void ecm_classifier_ovs_process_route_flow(struct ecm_classifier_ovs_instance *ecvi, struct ecm_db_connection_instance *ci,
+ 							struct sk_buff *skb, struct net_device *from_dev, struct net_device *to_dev,
+ 							struct ecm_classifier_process_response *process_response,
+-							ecm_classifier_ovs_process_callback_t cb)
++							ecm_tracker_sender_type_t sender)
+ {
+-	ecm_classifier_ovs_result_t result;
+-	struct ecm_classifier_ovs_process_response resp;
+ 	struct ovsmgr_dp_flow flow;
+ 	struct net_device *br_dev;
+-	ip_addr_t src_ip, dst_ip;
++	int error;
+ 
+ 	memset(&flow, 0, sizeof(flow));
+ 
+@@ -712,6 +666,17 @@ static void ecm_classifier_ovs_process_r
+ 	 * 	After the packet is encapsulated, the packet is routed and the
+ 	 * 	flow is not relavant flow.
+ 	 */
++
++	/*
++	 * We cannot use direct OVS flow lookup for packets, which have already
++	 * gone through OVS bridge. Routing and bridging both make it unable to do
++	 * direct OVS flow lookup by extracting flow key from SKB. In this case we
++	 * use the OVS flow hash embedded in skb to find the correct flow. For all
++	 * other packets we use direct flow lookup. All this functionality is
++	 * hidden inside OVSMGR, all we need to do is to provide the correct source
++	 * and destination MAC addresses.
++	 */
++
+ 	if (from_dev) {
+ 		/*
+ 		 * Case 1/2
+@@ -735,109 +700,30 @@ static void ecm_classifier_ovs_process_r
+ 
+ 		DEBUG_TRACE("%px: processing route flow from_dev = %s, br_dev = %s", ecvi, from_dev->name, br_dev->name);
+ 
+-		/*
+-		 * We always take the flow from bridge to port, so indev is brdige and outdev is port device.
+-		 */
+-		flow.indev = br_dev;
+-		flow.outdev = from_dev;
+-
+-		flow.tuple.src_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO_NAT));
+-		flow.tuple.dst_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO_NAT, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, dst_ip);
++		if (flow.is_post_ovs) {
++			flow.indev = from_dev;
++			flow.outdev = br_dev;
+ 
+-		if (flow.tuple.ip_version == 4) {
+-			ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.src, src_ip);
+-			ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.dst, dst_ip);
+-		} else if (flow.tuple.ip_version == 6) {
+-			ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.src, src_ip);
+-			ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.dst, dst_ip);
++			ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, flow.smac);
++			ether_addr_copy(flow.dmac, br_dev->dev_addr);
+ 		} else {
+-			DEBUG_ASSERT(NULL, "%px: unexpected ip_version: %d", ecvi, flow.tuple.ip_version );
+-		}
++			flow.indev = br_dev;
++			flow.outdev = from_dev;
+ 
+-		ether_addr_copy(flow.smac, br_dev->dev_addr);
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, flow.dmac);
+-
+-		memset(&resp, 0, sizeof(struct ecm_classifier_ovs_process_response));
+-
+-		/*
+-		 * Initialize the dscp with the default value.
+-		 */
+-		resp.dscp = OVSMGR_INVALID_DSCP;
++			ether_addr_copy(flow.smac, br_dev->dev_addr);
++			ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, flow.dmac);
++		}
+ 
+ 		DEBUG_TRACE("%px: Route Flow Process (from): src MAC: %pM src_dev: %s src: %pI4:%d proto: %d dest: %pI4:%d dest_dev: %s dest MAC: %pM\n",
+ 				&flow, flow.smac, flow.indev->name, &flow.tuple.ipv4.src, flow.tuple.src_port, flow.tuple.protocol,
+ 				&flow.tuple.ipv4.dst, flow.tuple.dst_port, flow.outdev->name, flow.dmac);
+-		/*
+-		 * Call the external callback and get the result.
+-		 */
+-		result = cb(&flow, skb, &resp);
+-
+-		dev_put(br_dev);
+-
+-		if (resp.dscp != OVSMGR_INVALID_DSCP) {
+-			/*
+-			 * Copy DSCP value to the classifier's process response's flow_dscp field,
+-			 * because this is the from_dev and the direction of the flow is flow direction.
+-			 */
+-			spin_lock_bh(&ecm_classifier_ovs_lock);
+-			ecvi->process_response.flow_dscp = resp.dscp >> XT_DSCP_SHIFT;
+-			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_DSCP;
+-			spin_unlock_bh(&ecm_classifier_ovs_lock);
+-			DEBUG_TRACE("FLOW DSCP : 0x%x\n", ecvi->process_response.flow_dscp);
+-		}
+ 
+-		/*
+-		 * Handle the result
+-		 */
+-		switch (result) {
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_ACCEL:
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL:
+-			/*
+-			 * Allow accel after setting the external module response.
+-			 */
+-			DEBUG_WARN("%px: External callback process succeeded\n", ecvi);
++		error = ecm_classifier_ovs_flow_find(&flow, skb, ecvi, sender);
+ 
+-			spin_lock_bh(&ecm_classifier_ovs_lock);
+-			if (resp.egress_vlan[0].h_vlan_TCI) {
+-				ecvi->process_response.ingress_vlan_tag[0] = resp.egress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[0].h_vlan_TCI;
+-				DEBUG_TRACE("Ingress vlan tag[0] set : %x\n", ecvi->process_response.ingress_vlan_tag[0]);
+-			}
+-
+-			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_TAG;
+-
+-			if (result == ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL) {
+-				if (resp.egress_vlan[1].h_vlan_TCI) {
+-					ecvi->process_response.ingress_vlan_tag[1] = resp.egress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[1].h_vlan_TCI;
+-					DEBUG_TRACE("Ingress vlan tag[0] set : %x\n", ecvi->process_response.ingress_vlan_tag[1]);
+-				}
+-
+-				ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_QINQ_TAG;
+-			}
+-			spin_unlock_bh(&ecm_classifier_ovs_lock);
+-			break;
++		dev_put(br_dev);
+ 
+-		case ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL:
+-			/*
+-			 * External callback failed to process VLAN process. So, let's deny the acceleration
+-			 * and try more with the subsequent packets.
+-			 */
+-			DEBUG_WARN("%px: External callback failed to process VLAN tags\n", ecvi);
++		if (error)
+ 			goto route_deny_accel;
+-
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_ACCEL:
+-
+-			/*
+-			 * There is no VLAN tag in the flow. Just allow the acceleration.
+-			 */
+-			DEBUG_WARN("%px: External callback didn't find any VLAN relation\n", ecvi);
+-			break;
+-
+-		default:
+-			DEBUG_ASSERT(false, "Unhandled result: %d\n", result);
+-		}
+ 	}
+ 
+ 	if (to_dev) {
+@@ -859,106 +745,30 @@ static void ecm_classifier_ovs_process_r
+ 
+ 		DEBUG_TRACE("%px: processing route flow to_dev = %s, br_dev = %s", ecvi, to_dev->name, br_dev->name);
+ 
+-		flow.indev = br_dev;
+-		flow.outdev = to_dev;
+-
+-		flow.tuple.src_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM_NAT));
+-		flow.tuple.dst_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM_NAT, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
++		if (flow.is_post_ovs) {
++			flow.indev = to_dev;
++			flow.outdev = br_dev;
+ 
+-		if (flow.tuple.ip_version == 4) {
+-			ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.src, src_ip);
+-			ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.dst, dst_ip);
+-		} else if (flow.tuple.ip_version == 6) {
+-			ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.src, src_ip);
+-			ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.dst, dst_ip);
++			ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, flow.smac);
++			ether_addr_copy(flow.dmac, br_dev->dev_addr);
+ 		} else {
+-			DEBUG_ASSERT(NULL, "%px: unexpected ip_version: %d", ecvi, flow.tuple.ip_version );
+-		}
++			flow.indev = br_dev;
++			flow.outdev = to_dev;
+ 
+-		ether_addr_copy(flow.smac, br_dev->dev_addr);
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, flow.dmac);
+-
+-		memset(&resp, 0, sizeof(struct ecm_classifier_ovs_process_response));
+-
+-		/*
+-		 * Initialize the dscp with the default value.
+-		 */
+-		resp.dscp = OVSMGR_INVALID_DSCP;
++			ether_addr_copy(flow.smac, br_dev->dev_addr);
++			ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, flow.dmac);
++		}
+ 
+ 		DEBUG_TRACE("%px: Route Flow Process (to): src MAC: %pM src_dev: %s src: %pI4:%d proto: %d dest: %pI4:%d dest_dev: %s dest MAC: %pM\n",
+ 				&flow, flow.smac, flow.indev->name, &flow.tuple.ipv4.src, flow.tuple.src_port, flow.tuple.protocol,
+ 				&flow.tuple.ipv4.dst, flow.tuple.dst_port, flow.outdev->name, flow.dmac);
+-		/*
+-		 * Call the external callback and get the result.
+-		 */
+-		result = cb(&flow, skb, &resp);
+ 
+-		dev_put(br_dev);
++		error = ecm_classifier_ovs_flow_find(&flow, skb, ecvi, sender);
+ 
+-		if (resp.dscp != OVSMGR_INVALID_DSCP) {
+-			/*
+-			 * Copy DSCP value to the classifier's process response's return_dscp field,
+-			 * because this is the to_dev and the direction of the flow is reply direction.
+-			 */
+-			spin_lock_bh(&ecm_classifier_ovs_lock);
+-			ecvi->process_response.return_dscp = resp.dscp >> XT_DSCP_SHIFT;
+-			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_DSCP;
+-			spin_unlock_bh(&ecm_classifier_ovs_lock);
+-			DEBUG_TRACE("RETURN DSCP : 0x%x\n", ecvi->process_response.return_dscp);
+-		}
+-
+-		/*
+-		 * Handle the result
+-		 */
+-		switch (result) {
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_ACCEL:
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL:
+-			/*
+-			 * Allow accel after setting the external module response.
+-			 */
+-			DEBUG_WARN("%px: External callback process succeeded\n", ecvi);
+-
+-			spin_lock_bh(&ecm_classifier_ovs_lock);
+-			if (resp.egress_vlan[0].h_vlan_TCI) {
+-				ecvi->process_response.egress_vlan_tag[0] = resp.egress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[0].h_vlan_TCI;
+-				DEBUG_TRACE("Egress vlan tag[0] set : %x\n", ecvi->process_response.egress_vlan_tag[0]);
+-			}
+-
+-			ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_TAG;
+-
+-			if (result == ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL) {
+-				if (resp.egress_vlan[1].h_vlan_TCI) {
+-					ecvi->process_response.egress_vlan_tag[1] = resp.egress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[1].h_vlan_TCI;
+-					DEBUG_TRACE("Ingress vlan tag[0] set : %x\n", ecvi->process_response.ingress_vlan_tag[1]);
+-				}
+-
+-				ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_QINQ_TAG;
+-			}
+-			spin_unlock_bh(&ecm_classifier_ovs_lock);
+-			break;
++		dev_put(br_dev);
+ 
+-		case ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL:
+-			/*
+-			 * External callback failed to process VLAN process. So, let's deny the acceleration
+-			 * and try more with the subsequent packets.
+-			 */
+-			DEBUG_WARN("%px: External callback failed to process VLAN tags\n", ecvi);
++		if (error)
+ 			goto route_deny_accel;
+-
+-		case ECM_CLASSIFIER_OVS_RESULT_ALLOW_ACCEL:
+-
+-			/*
+-			 * There is no VLAN tag in the flow. Just allow the acceleration.
+-			 */
+-			DEBUG_WARN("%px: External callback didn't find any VLAN relation\n", ecvi);
+-			break;
+-
+-		default:
+-			DEBUG_ASSERT(false, "Unhandled result: %d\n", result);
+-		}
+ 	}
+ 
+ 	/*
+@@ -1007,15 +817,14 @@ static void ecm_classifier_ovs_process(s
+ 									struct ecm_classifier_process_response *process_response)
+ {
+ 	struct ecm_classifier_ovs_instance *ecvi = (struct ecm_classifier_ovs_instance *)aci;
+-	ecm_classifier_ovs_result_t result = 0;
+ 	struct ecm_db_connection_instance *ci;
+-	ecm_classifier_ovs_process_callback_t cb = NULL;
+-	ip_addr_t src_ip;
++#ifdef ECM_MULTICAST_ENABLE
+ 	ip_addr_t dst_ip;
+-	struct ecm_classifier_ovs_process_response resp;
++#endif
+ 	struct ovsmgr_dp_flow flow;
+ 	struct net_device *from_dev = NULL;
+ 	struct net_device *to_dev = NULL;
++	int error;
+ 
+ 	DEBUG_CHECK_MAGIC(ecvi, ECM_CLASSIFIER_OVS_INSTANCE_MAGIC, "%px: invalid state magic\n", ecvi);
+ 
+@@ -1045,7 +854,7 @@ static void ecm_classifier_ovs_process(s
+ #ifdef ECM_MULTICAST_ENABLE
+ 	ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
+ 	if (ecm_ip_addr_is_multicast(dst_ip)) {
+-		ecm_classifier_ovs_process_multicast(ci, skb, ecvi, process_response);
++		ecm_classifier_ovs_process_multicast(ci, skb, ecvi, process_response, sender);
+ 		ecm_db_connection_deref(ci);
+ 		return;
+ 	}
+@@ -1067,33 +876,10 @@ static void ecm_classifier_ovs_process(s
+ 	}
+ 
+ 	/*
+-	 * Is there an external callback to get the ovs value from the packet?
+-	 */
+-	spin_lock_bh(&ecm_classifier_ovs_lock);
+-	cb = ovs.ovs_process;
+-	if (!cb) {
+-		/*
+-		 * Allow acceleration.
+-		 * Keep the classifier relevant to connection for stats update..
+-		 */
+-		spin_unlock_bh(&ecm_classifier_ovs_lock);
+-		DEBUG_WARN("%px: No external process callback set\n", aci);
+-		if (from_dev)
+-			dev_put(from_dev);
+-
+-		if (to_dev)
+-			dev_put(to_dev);
+-
+-		spin_lock_bh(&ecm_classifier_ovs_lock);
+-		goto allow_accel;
+-	}
+-	spin_unlock_bh(&ecm_classifier_ovs_lock);
+-
+-	/*
+ 	 * If the flow is a routed flow, set the is_routed flag of the flow.
+ 	 */
+ 	if (ecm_db_connection_is_routed_get(ci)) {
+-		ecm_classifier_ovs_process_route_flow(ecvi, ci, skb, from_dev, to_dev, process_response, cb);
++		ecm_classifier_ovs_process_route_flow(ecvi, ci, skb, from_dev, to_dev, process_response, sender);
+ 
+ 		if (from_dev)
+ 			dev_put(from_dev);
+@@ -1141,11 +927,6 @@ static void ecm_classifier_ovs_process(s
+ 		flow.indev = from_dev;
+ 		flow.outdev = to_dev;
+ 
+-		flow.tuple.src_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+-		flow.tuple.dst_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
+ 		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, flow.smac);
+ 		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, flow.dmac);
+ 	} else {
+@@ -1153,40 +934,11 @@ static void ecm_classifier_ovs_process(s
+ 		flow.indev = to_dev;
+ 		flow.outdev = from_dev;
+ 
+-		flow.tuple.src_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
+-		flow.tuple.dst_port = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, dst_ip);
+ 		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, flow.smac);
+ 		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, flow.dmac);
+-
+ 	}
+ 
+-	if (flow.tuple.ip_version == 4) {
+-		ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.src, src_ip);
+-		ECM_IP_ADDR_TO_NIN4_ADDR(flow.tuple.ipv4.dst, dst_ip);
+-	} else if (flow.tuple.ip_version == 6) {
+-		ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.src, src_ip);
+-		ECM_IP_ADDR_TO_NIN6_ADDR(flow.tuple.ipv6.dst, dst_ip);
+-	} else {
+-		DEBUG_ASSERT(NULL, "%px: unexpected ip_version: %d", aci, flow.tuple.ip_version );
+-	}
+-
+-	memset(&resp, 0, sizeof(struct ecm_classifier_ovs_process_response));
+-
+-	/*
+-	 * Set default values for flow and return DSCP.
+-	 * External module will call the DSCP query twice to
+-	 * find both directions' values.
+-	 */
+-	resp.flow_dscp = OVSMGR_INVALID_DSCP;
+-	resp.return_dscp = OVSMGR_INVALID_DSCP;
+-
+-	/*
+-	 * Call the external callback and get the result.
+-	 */
+-	result = cb(&flow, skb, &resp);
++	error = ecm_classifier_ovs_flow_find(&flow, skb, ecvi, sender);
+ 
+ 	if (from_dev)
+ 		dev_put(from_dev);
+@@ -1194,146 +946,13 @@ static void ecm_classifier_ovs_process(s
+ 	if (to_dev)
+ 		dev_put(to_dev);
+ 
+-	/*
+-	 * Handle the result
+-	 */
+-	switch (result) {
+-	case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_ACCEL:
+-	case ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL:
+-		/*
+-		 * Allow accel after setting the external module response.
+-		 */
+-		DEBUG_WARN("%px: External callback process succeeded\n", aci);
+-
+-		spin_lock_bh(&ecm_classifier_ovs_lock);
+-		ecvi->process_response.ingress_vlan_tag[0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+-		ecvi->process_response.egress_vlan_tag[0] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+-		ecvi->process_response.ingress_vlan_tag[1] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+-		ecvi->process_response.egress_vlan_tag[1] = ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED;
+-
+-		/*
+-		 * Primary VLAN tag is always present even it is QinQ.
+-		 */
+-		ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_TAG;
+-
+-		/*
+-		 * If the sender type is source, which means the packet is coming from the originator,
+-		 * we assign the ECM-ingress<>OVS-ingress, ECM-egress<>OVS-egress values.
+-		 */
+-		if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
+-			if (resp.ingress_vlan[0].h_vlan_TCI) {
+-				ecvi->process_response.ingress_vlan_tag[0] = resp.ingress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.ingress_vlan[0].h_vlan_TCI;
+-				DEBUG_TRACE("Ingress vlan tag[0] set : 0x%x\n", ecvi->process_response.ingress_vlan_tag[0]);
+-			}
+-
+-			if (resp.egress_vlan[0].h_vlan_TCI) {
+-				ecvi->process_response.egress_vlan_tag[0] = resp.egress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[0].h_vlan_TCI;
+-				DEBUG_TRACE("Egress vlan tag[0] set : 0x%x\n", ecvi->process_response.egress_vlan_tag[0]);
+-			}
+-
+-			if (result == ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL) {
+-				if (resp.ingress_vlan[1].h_vlan_TCI) {
+-					ecvi->process_response.ingress_vlan_tag[1] = resp.ingress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.ingress_vlan[1].h_vlan_TCI;
+-					DEBUG_TRACE("Ingress vlan tag[0] set : 0x%x\n", ecvi->process_response.ingress_vlan_tag[1]);
+-				}
+-
+-				if (resp.egress_vlan[1].h_vlan_TCI) {
+-					ecvi->process_response.egress_vlan_tag[1] = resp.egress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[1].h_vlan_TCI;
+-					DEBUG_TRACE("Egress vlan tag[1] set : 0x%x\n", ecvi->process_response.egress_vlan_tag[1]);
+-				}
+-
+-				/*
+-				 * QinQ tag is present. Let's pass this information to the frontend through the process action flag.
+-				 */
+-				ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_QINQ_TAG;
+-			}
+-		} else {
+-			/*
+-			 * Sender type is destination, which means packet si coming from the counter originator side,
+-			 * we assign the ECM-ingress<>OVS-egress and ECM-egress<>OVS-ingress values.
+-			 */
+-			if (resp.ingress_vlan[0].h_vlan_TCI) {
+-				ecvi->process_response.egress_vlan_tag[0] = resp.ingress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.ingress_vlan[0].h_vlan_TCI;
+-				DEBUG_TRACE("Egress vlan tag[0] set : 0x%x\n", ecvi->process_response.egress_vlan_tag[0]);
+-			}
+-
+-			if (resp.egress_vlan[0].h_vlan_TCI) {
+-				ecvi->process_response.ingress_vlan_tag[0] = resp.egress_vlan[0].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[0].h_vlan_TCI;
+-				DEBUG_TRACE("Ingress vlan tag[0] set : 0x%x\n", ecvi->process_response.ingress_vlan_tag[0]);
+-			}
+-
+-			if (result == ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL) {
+-				if (resp.ingress_vlan[1].h_vlan_TCI) {
+-					ecvi->process_response.egress_vlan_tag[1] = resp.ingress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.ingress_vlan[1].h_vlan_TCI;
+-					DEBUG_TRACE("Egress vlan tag[0] set : 0x%x\n", ecvi->process_response.egress_vlan_tag[1]);
+-				}
+-
+-				if (resp.egress_vlan[1].h_vlan_TCI) {
+-					ecvi->process_response.ingress_vlan_tag[1] = resp.egress_vlan[1].h_vlan_encapsulated_proto << 16 | resp.egress_vlan[1].h_vlan_TCI;
+-					DEBUG_TRACE("Ingress vlan tag[1] set : 0x%x\n", ecvi->process_response.ingress_vlan_tag[1]);
+-				}
+-
+-				/*
+-				 * QinQ tag is present. Let's pass this information to the frontend through the process action flag.
+-				 */
+-				ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_OVS_VLAN_QINQ_TAG;
+-			}
+-		}
+-
+-		break;
+-
+-	case ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL:
+-		/*
+-		 * External callback failed to process VLAN process. So, let's deny the acceleration
+-		 * and try more with the subsequent packets.
+-		 */
+-		DEBUG_WARN("%px: External callback failed to process VLAN tags\n", aci);
++	if (error)
+ 		goto deny_accel;
+ 
+-	case ECM_CLASSIFIER_OVS_RESULT_ALLOW_ACCEL:
+-
+-		/*
+-		 * There is no VLAN tag in the flow. Just allow the acceleration.
+-		 */
+-		DEBUG_WARN("%px: External callback didn't find any VLAN relation\n", aci);
+-		spin_lock_bh(&ecm_classifier_ovs_lock);
+-		break;
+-
+-	default:
+-		DEBUG_ASSERT(false, "Unhandled result: %d\n", result);
+-	}
+-
+-	/*
+-	 * If external module set any of the flow or return DSCP,
+-	 * we copy them to the classifier's process response based
+-	 * on the direction of the traffic. The external module
+-	 * should always set first the flow and then the return values.
+-	 */
+-	if ((resp.flow_dscp != OVSMGR_INVALID_DSCP) || (resp.return_dscp != OVSMGR_INVALID_DSCP)) {
+-		if (sender == ECM_TRACKER_SENDER_TYPE_SRC) {
+-			/*
+-			 * Copy DSCP values
+-			 */
+-			ecvi->process_response.flow_dscp = (resp.flow_dscp != OVSMGR_INVALID_DSCP) ? resp.flow_dscp >> XT_DSCP_SHIFT : 0;
+-			ecvi->process_response.return_dscp = (resp.return_dscp != OVSMGR_INVALID_DSCP) ? resp.return_dscp >> XT_DSCP_SHIFT : ecvi->process_response.flow_dscp;
+-			DEBUG_TRACE("FLOW DSCP: 0x%x RETURN DSCP: 0x%x\n",
+-					ecvi->process_response.flow_dscp, ecvi->process_response.return_dscp);
+-		} else {
+-			/*
+-			 * Copy DSCP values
+-			 */
+-			ecvi->process_response.flow_dscp = (resp.return_dscp != OVSMGR_INVALID_DSCP) ? resp.return_dscp >> XT_DSCP_SHIFT : 0;
+-			ecvi->process_response.return_dscp = (resp.flow_dscp != OVSMGR_INVALID_DSCP) ? resp.flow_dscp >> XT_DSCP_SHIFT : ecvi->process_response.flow_dscp;
+-			DEBUG_TRACE("FLOW DSCP: 0x%x RETURN DSCP: 0x%x\n",
+-					ecvi->process_response.flow_dscp, ecvi->process_response.return_dscp);
+-		}
+-		ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_DSCP;
+-	}
+-
+-allow_accel:
+ 	/*
+ 	 * Acceleration is permitted
+ 	 */
++	spin_lock_bh(&ecm_classifier_ovs_lock);
+ 	ecvi->process_response.relevance = ECM_CLASSIFIER_RELEVANCE_YES;
+ 	ecvi->process_response.process_actions |= ECM_CLASSIFIER_PROCESS_ACTION_ACCEL_MODE;
+ 	ecvi->process_response.accel_mode = ECM_CLASSIFIER_ACCELERATION_MODE_ACCEL;
+@@ -1407,6 +1026,8 @@ static void ecm_classifier_ovs_reclassif
+ 	 */
+ 	spin_lock_bh(&ecm_classifier_ovs_lock);
+ 	ecvi->process_response.relevance = ECM_CLASSIFIER_RELEVANCE_MAYBE;
++	ecvi->src_flow_acquired = false;
++	ecvi->dst_flow_acquired = false;
+ 	spin_unlock_bh(&ecm_classifier_ovs_lock);
+ }
+ 
+@@ -1426,64 +1047,6 @@ static void ecm_classifier_ovs_last_proc
+ 	spin_unlock_bh(&ecm_classifier_ovs_lock);
+ }
+ 
+-/*
+- * ecm_classifier_ovs_stats_sync()
+- *	Sync the stats of the OVS flow.
+- */
+-static inline void ecm_classifier_ovs_stats_sync(struct ovsmgr_dp_flow *flow,
+-					  uint32_t pkts, uint32_t bytes,
+-					  struct net_device *indev, struct net_device *outdev,
+-					  uint8_t *smac, uint8_t *dmac,
+-					  ip_addr_t sip, ip_addr_t dip,
+-					  uint16_t sport, uint16_t dport, uint16_t tci, uint16_t tpid)
+-{
+-	struct ovsmgr_dp_flow_stats stats;
+-
+-	flow->indev = indev;
+-	flow->outdev = outdev;
+-
+-	ether_addr_copy(flow->smac, smac);
+-	ether_addr_copy(flow->dmac, dmac);
+-
+-	/*
+-	 * Set default VLAN tci and vlan encapsulated proto.
+-	 */
+-	flow->ingress_vlan.h_vlan_TCI = 0;
+-	flow->ingress_vlan.h_vlan_encapsulated_proto = 0;
+-
+-	if (tci) {
+-		flow->ingress_vlan.h_vlan_TCI = tci;
+-		flow->ingress_vlan.h_vlan_encapsulated_proto = tpid;
+-	}
+-
+-	flow->tuple.src_port = sport;
+-	flow->tuple.dst_port = dport;
+-
+-	if (flow->tuple.ip_version == 4) {
+-		ECM_IP_ADDR_TO_NIN4_ADDR(flow->tuple.ipv4.src, sip);
+-		ECM_IP_ADDR_TO_NIN4_ADDR(flow->tuple.ipv4.dst, dip);
+-		DEBUG_TRACE("%px: STATS: src MAC: %pM src_dev: %s src: %pI4:%d proto: %d dest: %pI4:%d dest_dev: %s dest MAC: %pM TCI: %x, TPID: %x\n",
+-				flow, flow->smac, flow->indev->name, &flow->tuple.ipv4.src, flow->tuple.src_port, flow->tuple.protocol,
+-				&flow->tuple.ipv4.dst, flow->tuple.dst_port, flow->outdev->name, flow->dmac,
+-				flow->ingress_vlan.h_vlan_TCI, flow->ingress_vlan.h_vlan_encapsulated_proto);
+-	} else {
+-		ECM_IP_ADDR_TO_NIN6_ADDR(flow->tuple.ipv6.src, sip);
+-		ECM_IP_ADDR_TO_NIN6_ADDR(flow->tuple.ipv6.dst, dip);
+-		DEBUG_TRACE("%px: STATS: src MAC: %pM src_dev: %s src: %pI6:%d proto: %d dest: %pI6:%d dest_dev: %s dest MAC: %pM, TCI: %x, TPID: %x\n",
+-				flow, flow->smac, flow->indev->name, &flow->tuple.ipv6.src, flow->tuple.src_port, flow->tuple.protocol,
+-				&flow->tuple.ipv6.dst, flow->tuple.dst_port, flow->outdev->name, flow->dmac,
+-				flow->ingress_vlan.h_vlan_TCI, flow->ingress_vlan.h_vlan_encapsulated_proto);
+-	}
+-
+-	/*
+-	 * Set the flow stats and update the flow database.
+-	 */
+-	stats.pkts = pkts;
+-	stats.bytes = bytes;
+-
+-	ovsmgr_flow_stats_update(flow, &stats);
+-}
+-
+ #ifdef ECM_MULTICAST_ENABLE
+ /*
+  * ecm_classifier_ovs_multicast_sync_to_stats()
+@@ -1492,28 +1055,19 @@ static inline void ecm_classifier_ovs_st
+ static void ecm_classifier_ovs_multicast_sync_to_stats(struct ecm_classifier_ovs_instance *ecvi,
+ 					struct ecm_db_connection_instance *ci, struct ecm_classifier_rule_sync *sync)
+ {
+-	struct net_device *from_dev;
+ 	struct net_device *to_ovs_port[ECM_DB_MULTICAST_IF_MAX];
+ 	struct net_device *to_ovs_brdev[ECM_DB_MULTICAST_IF_MAX];
+-	struct net_device *br_dev;
+-	ip_addr_t src_ip;
+-	ip_addr_t dst_ip;
+-	uint8_t smac[ETH_ALEN];
+-	uint8_t dmac[ETH_ALEN];
+-	uint16_t sport;
+-	uint16_t dport;
+ 	struct ovsmgr_dp_flow flow;
+ 	int if_cnt, i, valid_ifcnt = 0, ifindex;
+-	uint16_t tpid = 0, tci = 0;
++	struct ovsmgr_dp_flow_stats stats;
+ 
+ 	/*
+ 	 * Get the possible OVS bridge ports.
+ 	 */
+-	from_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_FROM, true);
+ 	if_cnt = ecm_interface_multicast_ovs_to_interface_get_and_ref(ci, to_ovs_port, to_ovs_brdev);
+ 	valid_ifcnt = if_cnt;
+ 
+-	if (!from_dev && !if_cnt) {
++	if (!if_cnt) {
+ 		DEBUG_WARN("%px: None of the from/to interfaces is OVS bridge port\n", ci);
+ 		goto done;
+ 	}
+@@ -1533,27 +1087,11 @@ static void ecm_classifier_ovs_multicast
+ 		 * Sync the flow direction.
+ 		 * eth1 to eth2
+ 		 */
+-		sport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+-		dport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
+-
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, smac);
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, dmac);
+-
+-		if (ecvi->process_response.ingress_vlan_tag[0] != ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED) {
+-			tci = ecvi->process_response.ingress_vlan_tag[0] & 0xffff;
+-			tpid = (ecvi->process_response.ingress_vlan_tag[0] >> 16) & 0xffff;
+-			DEBUG_TRACE("%px: Ingress VLAN : %x:%x\n", ci, tci, tpid);
+-		}
+-
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				sync->rx_packet_count[ECM_CONN_DIR_FLOW], sync->rx_byte_count[ECM_CONN_DIR_FLOW],
+-				from_dev, to_ovs_port[0],
+-				smac, dmac,
+-				src_ip, dst_ip,
+-				sport, dport, tci, tpid);
++		if (ecvi->src_flow_acquired) {
++			stats.pkts = sync->rx_packet_count[ECM_CONN_DIR_FLOW];
++			stats.bytes = sync->rx_byte_count[ECM_CONN_DIR_FLOW];
++			ovsmgr_flow_stats_update(ecvi->src_flow.in_port, &ecvi->src_flow.ufid, &stats);
++		}
+ 
+ 		goto done;
+ 	}
+@@ -1588,61 +1126,6 @@ static void ecm_classifier_ovs_multicast
+ 	}
+ 
+ 	/*
+-	 * For routed flows below configurations are possible.
+-	 *
+-	 * 1. From interface is OVS bridge port, to interface is
+-	 * another OVS bridge port
+-	 * PC1 -----> eth1-ovs-br1--->ovs-br2-eth2----->PC2
+-	 *
+-	 * 2. From interface is OVS bridge port, multiple to
+-	 * OVS bridge port (OVS master is same).
+-	 * PC1 -----> eth1-ovs-br1--->ovs-br2-eth2,eth3----->PC2
+-	 *
+-	 * 3. From interface is OVS bridge port, multiple to
+-	 * OVS bridge port (OVS masters are different).
+-	 * PC1 -----> eth1-ovs-br1--->ovs-br2-eth2/ovs-br3-eth3----->PC2
+-	 */
+-	if (from_dev) {
+-		/*
+-		 * from_dev = eth1
+-		 * br_dev = ovs-br1
+-		 */
+-		br_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_FROM, false);
+-		if (!br_dev) {
+-			DEBUG_WARN("%px: from_dev = %s is a OVS bridge port, bridge interface is not found\n",
+-					ci, from_dev->name);
+-			goto done;
+-		}
+-
+-		/*
+-		 * Sync the flow direction.
+-		 * eth1 to ovs-br1
+-		 */
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, smac);
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, dmac);
+-
+-		sport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+-		dport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
+-
+-		if (ecvi->process_response.ingress_vlan_tag[0] != ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED) {
+-			tci = ecvi->process_response.ingress_vlan_tag[0] & 0xffff;
+-			tpid = (ecvi->process_response.ingress_vlan_tag[0] >> 16) & 0xffff;
+-			DEBUG_TRACE("%px: Ingress VLAN : %x:%x\n", ci, tci, tpid);
+-		}
+-
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				sync->rx_packet_count[ECM_CONN_DIR_FLOW], sync->rx_byte_count[ECM_CONN_DIR_FLOW],
+-				from_dev, br_dev,
+-				smac, dmac,
+-				src_ip, dst_ip,
+-				sport, dport, tci, tpid);
+-		dev_put(br_dev);
+-	}
+-
+-	/*
+ 	 * For routed flow, to side can be multiple OVS bridge ports and
+ 	 * the ports can be part of different OVS bridge master.
+ 	 *
+@@ -1662,33 +1145,15 @@ static void ecm_classifier_ovs_multicast
+ 	 * ovs-br3 to eth3
+ 	 *
+ 	 */
+-	ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, dmac);
+-	ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
+ 	for (i = 0; i < valid_ifcnt; i++) {
+-		ether_addr_copy(smac, to_ovs_brdev[i]->dev_addr);
+-
+-		sport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+-		dport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, src_ip);
+-
+-		/*
+-		 * tci and tpid is 0 for pkts received from ovs bridge
+-		 */
+-		tci = tpid = 0;
+-
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				sync->rx_packet_count[ECM_CONN_DIR_FLOW], sync->rx_byte_count[ECM_CONN_DIR_FLOW],
+-				to_ovs_brdev[i], to_ovs_port[i],
+-				smac, dmac,
+-				src_ip, dst_ip,
+-				sport, dport, tci, tpid);
++		if (ecvi->src_flow_acquired) {
++			stats.pkts = sync->rx_packet_count[ECM_CONN_DIR_FLOW];
++			stats.bytes = sync->rx_byte_count[ECM_CONN_DIR_FLOW];
++			ovsmgr_flow_stats_update(ecvi->src_flow.in_port, &ecvi->src_flow.ufid, &stats);
++		}
+ 	}
+ 
+ done:
+-	if (from_dev)
+-		dev_put(from_dev);
+-
+ 	for (i = 0; i < valid_ifcnt; i++) {
+ 		dev_put(to_ovs_port[i]);
+ 	}
+@@ -1701,18 +1166,11 @@ done:
+  */
+ static void ecm_classifier_ovs_sync_to_stats(struct ecm_classifier_instance *aci, struct ecm_classifier_rule_sync *sync)
+ {
+-	ip_addr_t src_ip;
++#ifdef ECM_MULTICAST_ENABLE
+ 	ip_addr_t dst_ip;
++#endif
+ 	struct ecm_db_connection_instance *ci;
+-	struct ovsmgr_dp_flow flow;
+-	struct net_device *from_dev;
+-	struct net_device *to_dev;
+-	struct net_device *br_dev;
+-	uint8_t smac[ETH_ALEN];
+-	uint8_t dmac[ETH_ALEN];
+-	uint16_t sport;
+-	uint16_t dport;
+-	uint16_t tpid = 0, tci = 0;
++	struct ovsmgr_dp_flow_stats stats;
+ 
+ 	struct ecm_classifier_ovs_instance *ecvi = (struct ecm_classifier_ovs_instance *)aci;
+ 
+@@ -1724,6 +1182,8 @@ static void ecm_classifier_ovs_sync_to_s
+ 		return;
+ 	}
+ 
++	DEBUG_TRACE("Updating stats for CI %d\n", ci->serial);
++
+ #ifdef ECM_MULTICAST_ENABLE
+ 	/*
+ 	 * Check for multicast connection.
+@@ -1735,229 +1195,23 @@ static void ecm_classifier_ovs_sync_to_s
+ 		return;
+ 	}
+ #endif
+-	memset(&flow, 0, sizeof(flow));
+-
+-	/*
+-	 * Get the possible OVS bridge ports.
+-	 */
+-	from_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_FROM, true);
+-	to_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_TO, true);
+-
+-	/*
+-	 * IP version and protocol are common for routed and bridge flows.
+-	 */
+-	flow.tuple.ip_version = ecm_db_connection_ip_version_get(ci);
+-	flow.tuple.protocol = ecm_db_connection_protocol_get(ci);
+-	flow.is_routed = ecm_db_connection_is_routed_get(ci);
+ 
+ 	/*
+-	 * Get the tci and tpid values of the ingress side of the flow.
+-	 */
+-	if (ecvi->process_response.ingress_vlan_tag[0] != ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED) {
+-		tci = ecvi->process_response.ingress_vlan_tag[0] & 0xffff;
+-		tpid = (ecvi->process_response.ingress_vlan_tag[0] >> 16) & 0xffff;
+-		DEBUG_TRACE("%px: Ingress VLAN : %x:%x\n", aci, tci, tpid);
+-	}
+-
+-	/*
+-	 * Bridge flow
+-	 */
+-	if (!flow.is_routed) {
+-		/*
+-		 * Sync the flow direction (eth1 to eth2)
+-		 *
+-		 * ECM depends on netdev private flags to identify
+-		 * if it is an OVS port, if the port is removed from
+-		 * bridge while traffic is running then the device is
+-		 * not part of bridge.  Do not update statistics if ports
+-		 * are removed from bridge.
+-		 */
+-		if (!from_dev || !to_dev) {
+-			ecm_db_connection_deref(ci);
+-			return;
+-		}
+-
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, smac);
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, dmac);
+-
+-		sport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+-		dport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
+-
+-		DEBUG_TRACE("%px: Flow direction stats update\n", aci);
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				  sync->rx_packet_count[ECM_CONN_DIR_FLOW], sync->rx_byte_count[ECM_CONN_DIR_FLOW],
+-				  from_dev, to_dev,
+-				  smac, dmac,
+-				  src_ip, dst_ip,
+-				  sport, dport, tci, tpid);
+-
+-		/*
+-		 * Sync the return direction (eth2 to eth1)
+-		 * All the flow parameters are reversed.
+-		 */
+-		DEBUG_TRACE("%px: Return direction stats update\n", aci);
+-
+-		/*
+-		 * Reset the tci and tpid values and get the egress side of the flow.
+-		 */
+-		tci = tpid = 0;
+-		if (ecvi->process_response.egress_vlan_tag[0] != ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED) {
+-			tci = ecvi->process_response.egress_vlan_tag[0] & 0xffff;
+-			tpid = (ecvi->process_response.egress_vlan_tag[0] >> 16) & 0xffff;
+-			DEBUG_TRACE("%px: Egress VLAN : %x:%x\n", aci, tci, tpid);
+-		}
+-
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				  sync->rx_packet_count[ECM_CONN_DIR_RETURN], sync->rx_byte_count[ECM_CONN_DIR_RETURN],
+-				  to_dev, from_dev,
+-				  dmac, smac,
+-				  dst_ip, src_ip,
+-				  dport, sport, tci, tpid);
+-		goto done;
+-	}
+-
+-	/*
+-	 * For routed flows both from and to side can be OVS bridge port, if there
+-	 * is a routed flow between two OVS bridges. (e.g: ovs-br1 and ovs-br2)
+-	 *
+-	 * These are the netdevice places and the IP address values based on the
+-	 * 4 different NAT cases.
+-	 *
+-	 * SNAT:
+-	 * PC1 -----> eth1-ovs-br1--->ovs-br2-eth2 -----> PC2
+-	 *		(from_dev)	(to_dev)
+-	 * src_ip			src_ip_nat	dest_ip/dest_ip_nat
+-	 *
+-	 * DNAT
+-	 * PC1 <----- eth1-ovs-br1<---ovs-br2-eth2 <----- PC2
+-	 *		(to_dev)	(from_dev)
+-	 * dest_ip			dest_ip_nat	src_ip/src_ip_nat
+-	 *
+-	 * Non-NAT - Egress
+-	 * PC1 -----> eth1-ovs-br1--->ovs-br2-eth2 -----> PC2
+-	 *		(from_dev)	(to_dev)
+-	 * src_ip/src_ip_nat				dest_ip/dest_ip_nat
+-	 *
+-	 * Non-NAT - Ingress
+-	 * PC1 <----- eth1-ovs-br1<---ovs-br2-eth2 <----- PC2
+-	 *		(to_dev)	(from_dev)
+-	 * dest_ip/dest_ip_nat				src_ip/src_ip_nat
++	 * Set the flow stats and update the flow database.
+ 	 */
+-	if (from_dev) {
+-		/*
+-		 * from_dev = eth1/eth2  (can be tagged)
+-		 * br_dev = ovs-br1/ovs_br2 (untagged)
+-		 */
+-		br_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_FROM, false);
+-		if (!br_dev) {
+-			DEBUG_WARN("%px: from_dev = %s is a OVS bridge port, bridge interface is not found\n",
+-					aci, from_dev->name);
+-			goto done;
+-		}
+-
+-		/*
+-		 * Sync the flow direction (eth1/eth2 to ovs-br1/ovs_br2) based on the NAT case.
+-		 */
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_FROM, smac);
+-		ether_addr_copy(dmac, br_dev->dev_addr);
+-
+-		/*
+-		 * If from_dev is a bridge port, dest_ip_nat and dest_port_nat satisfies all the NAT cases.
+-		 * So, we need to get the ECM_DB_OBJ_DIR_TO_NAT direction's IP and port number from the connection.
+-		 */
+-		sport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM));
+-		dport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO_NAT));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO_NAT, dst_ip);
+-
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				  sync->rx_packet_count[ECM_CONN_DIR_FLOW], sync->rx_byte_count[ECM_CONN_DIR_FLOW],
+-				  from_dev, br_dev,
+-				  smac, dmac,
+-				  src_ip, dst_ip,
+-				  sport, dport, tci, tpid);
+-
+-		/*
+-		 * Sync the return direction (ovs-br1/ovs_br2 to eth1/eth2) based on the NAT case.
+-		 * All the flow parameters are reversed.
+-		 */
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				  sync->tx_packet_count[ECM_CONN_DIR_FLOW], sync->tx_byte_count[ECM_CONN_DIR_FLOW],
+-				  br_dev, from_dev,
+-				  dmac, smac,
+-				  dst_ip, src_ip,
+-				  dport, sport, 0, 0);
+-		dev_put(br_dev);
++	if (ecvi->src_flow_acquired) {
++		stats.pkts = sync->rx_packet_count[ECM_CONN_DIR_FLOW];
++		stats.bytes = sync->rx_byte_count[ECM_CONN_DIR_FLOW];
++		ovsmgr_flow_stats_update(ecvi->src_flow.in_port, &ecvi->src_flow.ufid, &stats);
+ 	}
+ 
+-	if (to_dev) {
+-		/*
+-		 * to_dev = eth2/eth1 (can be tagged)
+-		 * br_dev = ovs-br2/ovs-br1 (untagged)
+-		 */
+-		br_dev = ecm_classifier_ovs_interface_get_and_ref(ci, ECM_DB_OBJ_DIR_TO, false);
+-		if (!br_dev) {
+-			DEBUG_WARN("%px: to_dev = %s is a OVS bridge port, bridge interface is not found\n",
+-					aci, to_dev->name);
+-			goto done;
+-		}
+-
+-		/*
+-		 * Reset the tci and tpid values and get the egress side of the flow.
+-		 */
+-		tci = tpid = 0;
+-		if (ecvi->process_response.egress_vlan_tag[0] != ECM_FRONT_END_VLAN_ID_NOT_CONFIGURED) {
+-			tci = ecvi->process_response.egress_vlan_tag[0] & 0xffff;
+-			tpid = (ecvi->process_response.egress_vlan_tag[0] >> 16) & 0xffff;
+-			DEBUG_TRACE("%px: Egress VLAN : %x:%x\n", aci, tci, tpid);
+-		}
+-
+-		/*
+-		 * Sync the flow direction (ovs-br2/ovs_br1 to eth2/eth1) based on the NAT case.
+-		 */
+-		ether_addr_copy(smac, br_dev->dev_addr);
+-		ecm_db_connection_node_address_get(ci, ECM_DB_OBJ_DIR_TO, dmac);
+-
+-		/*
+-		 * If to_dev is a bridge port, src_ip_nat and src_port_nat satisfies all the NAT cases.
+-		 * So, we need to get the ECM_DB_OBJ_DIR_FROM_NAT direction's IP and port number from the connection.
+-		 */
+-		sport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_FROM_NAT));
+-		dport = htons(ecm_db_connection_port_get(ci, ECM_DB_OBJ_DIR_TO));
+-
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_FROM_NAT, src_ip);
+-		ecm_db_connection_address_get(ci, ECM_DB_OBJ_DIR_TO, dst_ip);
+-
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				  sync->tx_packet_count[ECM_CONN_DIR_RETURN], sync->tx_byte_count[ECM_CONN_DIR_RETURN],
+-				  br_dev, to_dev,
+-				  smac, dmac,
+-				  src_ip, dst_ip,
+-				  sport, dport, 0, 0);
+-		/*
+-		 * Sync the return direction (eth2/eth1 to ovs-br2/ovs-br1) based on the NAT case.
+-		 * All the flow parameters are reversed.
+-		 */
+-		ecm_classifier_ovs_stats_sync(&flow,
+-				  sync->rx_packet_count[ECM_CONN_DIR_RETURN], sync->rx_byte_count[ECM_CONN_DIR_RETURN],
+-				  to_dev, br_dev,
+-				  dmac, smac,
+-				  dst_ip, src_ip,
+-				  dport, sport, tci, tpid);
+-		dev_put(br_dev);
++	if (ecvi->dst_flow_acquired) {
++		stats.pkts = sync->rx_packet_count[ECM_CONN_DIR_RETURN];
++		stats.bytes = sync->rx_byte_count[ECM_CONN_DIR_RETURN];
++		ovsmgr_flow_stats_update(ecvi->dst_flow.in_port, &ecvi->dst_flow.ufid, &stats);
+ 	}
+ 
+-done:
+ 	ecm_db_connection_deref(ci);
+-
+-	if (from_dev)
+-		dev_put(from_dev);
+-	if (to_dev)
+-		dev_put(to_dev);
+ }
+ 
+ /*
+@@ -2073,6 +1327,47 @@ static int ecm_classifier_ovs_state_get(
+ }
+ #endif
+ 
++bool ecm_classifier_ovs_should_flush(struct ecm_db_connection_instance *ci, uint32_t ufid_len, uint32_t *ufid)
++{
++	struct ecm_classifier_ovs_instance *ecvi;
++	struct ecm_classifier_instance *eci;
++	bool ufid_match;
++
++	if (ufid_len == 0) {
++		DEBUG_WARN("Flushed flow ufid len is 0\n");
++		return true;
++	}
++
++	eci = ecm_db_connection_assigned_classifier_find_and_ref(ci, ECM_CLASSIFIER_TYPE_OVS);
++	if (!eci) {
++		DEBUG_TRACE("Did not find OVS classifier\n");
++		return true;
++	}
++
++	/* Get OVS classifier and check ufid match */
++	ecvi = (struct ecm_classifier_ovs_instance *)eci;
++	ufid_match = memcmp(ufid, ecvi->src_flow.ufid.ufid, ufid_len) == 0 ||
++		     memcmp(ufid, ecvi->dst_flow.ufid.ufid, ufid_len) == 0;
++	eci->deref(eci);
++
++	DEBUG_TRACE("Flushed flow ufid (%d) %x %x %x %x\n", ufid_len,
++		ufid[0], ufid[1],
++		ufid[2], ufid[3]);
++	DEBUG_TRACE("SRC flow ufid (%d) %x %x %x %x\n", ecvi->src_flow.ufid.ufid_len,
++		ecvi->src_flow.ufid.ufid[0], ecvi->src_flow.ufid.ufid[1],
++		ecvi->src_flow.ufid.ufid[2], ecvi->src_flow.ufid.ufid[3]);
++	DEBUG_TRACE("DST flow ufid (%d) %x %x %x %x\n", ecvi->dst_flow.ufid.ufid_len,
++		ecvi->dst_flow.ufid.ufid[0], ecvi->dst_flow.ufid.ufid[1],
++		ecvi->dst_flow.ufid.ufid[2], ecvi->dst_flow.ufid.ufid[3]);
++	if (ufid_match) {
++		DEBUG_TRACE("Found matching ufid\n");
++	} else {
++		DEBUG_TRACE("Matching ufid not found\n");
++	}
++
++	return ufid_match;
++}
++
+ /*
+  * ecm_classifier_ovs_instance_alloc()
+  *	Allocate an instance of the ovs classifier
+@@ -2162,36 +1457,6 @@ struct ecm_classifier_ovs_instance *ecm_
+ EXPORT_SYMBOL(ecm_classifier_ovs_instance_alloc);
+ 
+ /*
+- * ecm_classifier_ovs_register_callbacks()
+- */
+-int ecm_classifier_ovs_register_callbacks(struct ecm_classifier_ovs_callbacks *ovs_cbs)
+-{
+-	spin_lock_bh(&ecm_classifier_ovs_lock);
+-
+-	if (unlikely(!ecm_classifier_ovs_enabled)) {
+-		spin_unlock_bh(&ecm_classifier_ovs_lock);
+-		return -1;
+-	}
+-
+-	ovs.ovs_process = ovs_cbs->ovs_process;
+-	spin_unlock_bh(&ecm_classifier_ovs_lock);
+-
+-	return 0;
+-}
+-EXPORT_SYMBOL(ecm_classifier_ovs_register_callbacks);
+-
+-/*
+- * ecm_classifier_ovs_unregister_callbacks()
+- */
+-void ecm_classifier_ovs_unregister_callbacks(void)
+-{
+-	spin_lock_bh(&ecm_classifier_ovs_lock);
+-	ovs.ovs_process = NULL;
+-	spin_unlock_bh(&ecm_classifier_ovs_lock);
+-}
+-EXPORT_SYMBOL(ecm_classifier_ovs_unregister_callbacks);
+-
+-/*
+  * ecm_classifier_ovs_init()
+  */
+ int ecm_classifier_ovs_init(struct dentry *dentry)
+--- a/Makefile
++++ b/Makefile
+@@ -28,9 +28,6 @@ endif
+ ifeq ($(EXAMPLES_BUILD_MARK),y)
+ obj-m += examples/ecm_mark_test.o
+ endif
+-ifeq ($(EXAMPLES_BUILD_OVS),y)
+-obj-m += examples/ecm_ovs.o
+-endif
+ 
+ ecm-y := \
+ 	 ecm_tracker_udp.o \
+--- a/examples/ecm_ovs.c
++++ /dev/null
+@@ -1,218 +0,0 @@
+-/*
+- **************************************************************************
+- * Copyright (c) 2019-2020, The Linux Foundation.  All rights reserved.
+- * Permission to use, copy, modify, and/or distribute this software for
+- * any purpose with or without fee is hereby granted, provided that the
+- * above copyright notice and this permission notice appear in all copies.
+- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+- * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+- **************************************************************************
+- */
+-#include <linux/module.h>
+-#include <linux/version.h>
+-#include <linux/types.h>
+-#include <linux/skbuff.h>
+-#include <linux/ctype.h>
+-#include <linux/etherdevice.h>
+-
+-#include <ovsmgr.h>
+-#include "ecm_classifier_ovs_public.h"
+-
+-/*
+- * This is a test module for the ECM's ovs CLassifier.
+- * It is extracting the VLAN information based on the flow information.
+- */
+-
+-/*
+- * ecm_ovs_dump_flow()
+- * 	Show OVS flow contents
+- */
+-static void ecm_ovs_dump_flow(struct ovsmgr_dp_flow *flow)
+-{
+-	pr_debug("OVS DP Flow:\n");
+-	if (flow->indev) {
+-		pr_debug("\tindev: %s\n", flow->indev->name);
+-	} else {
+-		pr_debug("\tindev: NULL\n");
+-	}
+-
+-	if (flow->outdev) {
+-		pr_debug("\toutdev: %s\n", flow->outdev->name);
+-	} else {
+-		pr_debug("\toutdev: NULL\n");
+-	}
+-
+-	pr_debug("\tSMAC: %pM\n", &flow->smac);
+-	pr_debug("\tSMAC: %pM\n", &flow->dmac);
+-	pr_debug("\tingress_vlan: %d:%x\n", flow->ingress_vlan.h_vlan_TCI, flow->ingress_vlan.h_vlan_encapsulated_proto);
+-	pr_debug("\tTuple: V: %d, P: %d, SP: %d, DP: %d\n", flow->tuple.ip_version, flow->tuple.protocol,
+-			flow->tuple.src_port, flow->tuple.dst_port);
+-
+-	if (flow->tuple.ip_version == 4) {
+-		pr_debug("\t\tSIP: %pI4, DIP: %pI4\n", &flow->tuple.ipv4.src, &flow->tuple.ipv4.dst);
+-	} else {
+-		pr_debug("\t\tSIP: %pI6, DIP: %pI6\n", &flow->tuple.ipv6.src, &flow->tuple.ipv6.dst);
+-	}
+-}
+-
+-/*
+- * ecm_ovs_get_ovs()
+- *	OVS get callback function registered with ECM.
+- */
+-static ecm_classifier_ovs_result_t ecm_ovs_process(struct ovsmgr_dp_flow *flow, struct sk_buff *skb, struct ecm_classifier_ovs_process_response *resp)
+-{
+-	struct ovsmgr_flow_info ofi;
+-	enum ovsmgr_flow_status status;
+-
+-	pr_debug("ecm_ovs_process\n");
+-
+-	memset((void *)&ofi, 0, sizeof(ofi));
+-	ecm_ovs_dump_flow(flow);
+-
+-	status = ovsmgr_flow_info_get(flow, skb, &ofi);
+-	if ((status == OVSMGR_FLOW_STATUS_DENY_ACCEL) || (status == OVSMGR_FLOW_STATUS_UNKNOWN)) {
+-		pr_debug("%px: Deny accelerating the flow\n", flow);
+-		return ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL;
+-	}
+-
+-	if (status == OVSMGR_FLOW_STATUS_DENY_ACCEL_EGRESS) {
+-		pr_debug("%px: Deny accelerating the flow, egress %s is not allowed\n", flow, flow->outdev->name);
+-		return ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL_EGRESS;
+-	}
+-
+-	/*
+-	 * get return DSCP value for bridge flow
+-	 */
+-	if (!flow->is_routed) {
+-		struct ovsmgr_flow_info return_ofi;
+-		struct ovsmgr_dp_flow return_flow;
+-		enum ovsmgr_flow_status return_status;
+-
+-		memset((void *)&return_ofi, 0, sizeof(return_ofi));
+-
+-		/*
+-		 * Create return flow
+-		 */
+-		return_flow.indev = flow->outdev;
+-		return_flow.outdev = flow->indev;
+-		return_flow.tuple.ip_version = flow->tuple.ip_version;
+-		return_flow.tuple.protocol = flow->tuple.protocol;
+-
+-		ether_addr_copy(return_flow.smac, flow->dmac);
+-		ether_addr_copy(return_flow.dmac, flow->smac);
+-		return_flow.ingress_vlan.h_vlan_TCI = ofi.egress[0].h_vlan_TCI;
+-		return_flow.ingress_vlan.h_vlan_encapsulated_proto = ofi.egress[0].h_vlan_encapsulated_proto;
+-		return_flow.tuple.src_port = flow->tuple.dst_port;
+-		return_flow.tuple.dst_port = flow->tuple.src_port;
+-
+-		if (return_flow.tuple.ip_version == 4) {
+-			return_flow.tuple.ipv4.src = flow->tuple.ipv4.dst;
+-			return_flow.tuple.ipv4.dst = flow->tuple.ipv4.src;
+-		} else {
+-			memcpy(&return_flow.tuple.ipv6.src, &flow->tuple.ipv6.dst, sizeof(return_flow.tuple.ipv6.src));
+-			memcpy(&return_flow.tuple.ipv6.dst, &flow->tuple.ipv6.src, sizeof(return_flow.tuple.ipv6.dst));
+-		}
+-
+-		resp->flow_dscp = ofi.dscp;
+-		ecm_ovs_dump_flow(&return_flow);
+-
+-		return_status = ovsmgr_flow_info_get(&return_flow, skb, &return_ofi);
+-		if ((return_status == OVSMGR_FLOW_STATUS_DENY_ACCEL) || (return_status == OVSMGR_FLOW_STATUS_UNKNOWN)) {
+-			// pr_info("%px: Deny accelerating the return flow\n", &return_flow);
+-			goto process_flow;
+-		}
+-
+-		resp->return_dscp = return_ofi.dscp;
+-	}
+-
+-process_flow:
+-	resp->dscp = ofi.dscp;
+-	switch (status) {
+-	case OVSMGR_FLOW_STATUS_ALLOW_VLAN_ACCEL:
+-	case OVSMGR_FLOW_STATUS_ALLOW_VLAN_QINQ_ACCEL:
+-		pr_debug("%px: Accelerate, VLAN data is valid\n", flow);
+-		/*
+-		 * Outer ingress VLAN
+-		 */
+-		resp->ingress_vlan[0].h_vlan_TCI = ofi.ingress[0].h_vlan_TCI;
+-		resp->ingress_vlan[0].h_vlan_encapsulated_proto = ofi.ingress[0].h_vlan_encapsulated_proto;
+-
+-		/*
+-		 * Outer egress VLAN
+-		 */
+-		resp->egress_vlan[0].h_vlan_TCI = ofi.egress[0].h_vlan_TCI;
+-		resp->egress_vlan[0].h_vlan_encapsulated_proto = ofi.egress[0].h_vlan_encapsulated_proto;
+-
+-		if (status == OVSMGR_FLOW_STATUS_ALLOW_VLAN_QINQ_ACCEL) {
+-			/*
+-			 * Inner ingress VLAN
+-			 */
+-			resp->ingress_vlan[1].h_vlan_TCI = ofi.ingress[1].h_vlan_TCI;
+-			resp->ingress_vlan[1].h_vlan_encapsulated_proto = ofi.ingress[1].h_vlan_encapsulated_proto;
+-
+-			/*
+-			 * Inner egress VLAN
+-			 */
+-			resp->egress_vlan[1].h_vlan_TCI = ofi.egress[1].h_vlan_TCI;
+-			resp->egress_vlan[1].h_vlan_encapsulated_proto = ofi.egress[1].h_vlan_encapsulated_proto;
+-
+-			return ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL;
+-		}
+-		return ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_ACCEL;
+-	case OVSMGR_FLOW_STATUS_ALLOW_ACCEL:
+-		return ECM_CLASSIFIER_OVS_RESULT_ALLOW_ACCEL;
+-	default:
+-		return ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL;
+-	}
+-}
+-
+-static struct ecm_classifier_ovs_callbacks callbacks = {
+-	.ovs_process = ecm_ovs_process,
+-};
+-
+-/*
+- * ecm_ovs_init()
+- */
+-static int __init ecm_ovs_init(void)
+-{
+-	int res;
+-
+-	pr_info("ECM OVS Test INIT\n");
+-
+-	/*
+-	 * Register the callbacks with the ECM ovs classifier.
+-	 */
+-	res = ecm_classifier_ovs_register_callbacks(&callbacks);
+-	if (res < 0) {
+-		pr_warn("Failed to register callbacks for OVS classifier\n");
+-		return res;
+-	}
+-
+-	return 0;
+-}
+-
+-/*
+- * ecm_ovs_exit()
+- */
+-static void __exit ecm_ovs_exit(void)
+-{
+-	pr_info("ECM OVS Test EXIT\n");
+-
+-	/*
+-	 * Unregister the callbacks.
+-	 */
+-	ecm_classifier_ovs_unregister_callbacks();
+-}
+-
+-module_init(ecm_ovs_init)
+-module_exit(ecm_ovs_exit)
+-
+-MODULE_DESCRIPTION("ECM OVS Test");
+-#ifdef MODULE_LICENSE
+-MODULE_LICENSE("Dual BSD/GPL");
+-#endif
+--- a/ecm_classifier_ovs_public.h
++++ /dev/null
+@@ -1,57 +0,0 @@
+-/*
+- **************************************************************************
+- * Copyright (c) 2019-2020, The Linux Foundation.  All rights reserved.
+- * Permission to use, copy, modify, and/or distribute this software for
+- * any purpose with or without fee is hereby granted, provided that the
+- * above copyright notice and this permission notice appear in all copies.
+- * THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES
+- * WITH REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF
+- * MERCHANTABILITY AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR
+- * ANY SPECIAL, DIRECT, INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES
+- * WHATSOEVER RESULTING FROM LOSS OF USE, DATA OR PROFITS, WHETHER IN AN
+- * ACTION OF CONTRACT, NEGLIGENCE OR OTHER TORTIOUS ACTION, ARISING OUT
+- * OF OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
+- **************************************************************************
+- */
+-
+-/*
+- * Result values of the external inspection module to the ECM's ovs classifier.
+- * Based on the result the ovs classifier takes the action for the inspected connection.
+- */
+-enum ecm_classifier_ovs_results {
+-	ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_ACCEL,		/* VLAN process succeeded */
+-	ECM_CLASSIFIER_OVS_RESULT_ALLOW_VLAN_QINQ_ACCEL,	/* VLAN process succeeded for QinQ */
+-	ECM_CLASSIFIER_OVS_RESULT_ALLOW_ACCEL,			/* No VLAN present, just accelerate */
+-	ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL_EGRESS,		/* Flow egress is not allowed for acceleration */
+-	ECM_CLASSIFIER_OVS_RESULT_DENY_ACCEL			/* Do not accelerate */
+-};
+-typedef enum ecm_classifier_ovs_results ecm_classifier_ovs_result_t;
+-
+-struct ecm_classifier_ovs_process_response {
+-	uint32_t dscp;			/* Used by the routed connections */
+-	uint32_t flow_dscp;		/* Bridge connection's flow DSCP value */
+-	uint32_t return_dscp;		/* Bridge connection's return DSCP value */
+-	struct vlan_hdr ingress_vlan[2];
+-					/* Ingress VLAN header */
+-	struct vlan_hdr egress_vlan[2];
+-					/* Egress VLAN header */
+-};
+-
+-
+-/*
+- * Callback function which processes the connection information.
+- */
+-typedef ecm_classifier_ovs_result_t (*ecm_classifier_ovs_process_callback_t)(struct ovsmgr_dp_flow *flow,
+-									     struct sk_buff *skb,
+-									     struct ecm_classifier_ovs_process_response *resp);
+-
+-struct ecm_classifier_ovs_callbacks {
+-	ecm_classifier_ovs_process_callback_t ovs_process;
+-};
+-
+-/*
+- * Register/Unregister callback functions which are called from the external modules.
+- */
+-int ecm_classifier_ovs_register_callbacks(struct ecm_classifier_ovs_callbacks *callbacks);
+-void ecm_classifier_ovs_unregister_callbacks(void);
+-
+--- a/ecm_classifier_ovs.h
++++ b/ecm_classifier_ovs.h
+@@ -16,3 +16,4 @@
+ 
+ struct ecm_classifier_ovs_instance;
+ struct ecm_classifier_ovs_instance *ecm_classifier_ovs_instance_alloc(struct ecm_db_connection_instance *ci);
++bool ecm_classifier_ovs_should_flush(struct ecm_db_connection_instance *ci, uint32_t ufid_len, uint32_t *ufid);
+--- a/ecm_db/ecm_db_node.c
++++ b/ecm_db/ecm_db_node.c
+@@ -64,6 +64,10 @@
+ #include "ecm_classifier_default.h"
+ #include "ecm_db.h"
+ 
++#ifdef ECM_INTERFACE_OVS_BRIDGE_ENABLE
++#include "ecm_classifier_ovs.h"
++#endif
++
+ /*
+  * Global list.
+  * All instances are inserted into global list - this allows easy iteration of all instances of a particular type.
+@@ -864,7 +868,8 @@ keep_node_conn:
+ void ecm_db_node_ovs_connections_masked_defunct(int ip_ver, uint8_t *src_mac, bool src_mac_check, ip_addr_t src_addr_mask,
+ 							uint16_t src_port_mask, uint8_t *dest_mac, bool dest_mac_check,
+ 							ip_addr_t dest_addr_mask, uint16_t dest_port_mask,
+-							int proto_mask, ecm_db_obj_dir_t dir, bool is_routed)
++							int proto_mask, ecm_db_obj_dir_t dir, bool is_routed,
++							uint32_t ufid_len, uint32_t *ufid)
+ {
+ 	struct ecm_db_node_instance *ni;
+ 	uint8_t smac[ETH_ALEN], dmac[ETH_ALEN];
+@@ -1021,6 +1026,11 @@ void ecm_db_node_ovs_connections_masked_
+ 			goto next_ci;
+ 
+ defunct_conn:
++			if (ecm_classifier_ovs_should_flush(ci, ufid_len, ufid) == false) {
++				DEBUG_TRACE("Skipping defunct\n");
++				goto next_ci;
++			}
++
+ 			cnt++;
+ 
+ 			DEBUG_TRACE("%px: Defuncting 7 tuple %s connection\n", ci, is_routed ? "routed" : "bridged");
+--- a/ecm_db/ecm_db_node.h
++++ b/ecm_db/ecm_db_node.h
+@@ -128,7 +128,8 @@ int ecm_db_node_hash_index_get_first(voi
+ void ecm_db_node_ovs_connections_masked_defunct(int ip_ver, uint8_t *src_mac, bool src_mac_check, ip_addr_t src_addr_mask,
+ 							uint16_t src_port_mask, uint8_t *dest_mac, bool dest_mac_check,
+ 							ip_addr_t dest_addr_mask, uint16_t dest_port_mask,
+-							int proto_mask, ecm_db_obj_dir_t dir, bool is_routed);
++							int proto_mask, ecm_db_obj_dir_t dir, bool is_routed,
++							uint32_t ufid_len, uint32_t *ufid);
+ 
+ bool ecm_db_node_init(struct dentry *dentry);
+ void ecm_db_node_exit(void);

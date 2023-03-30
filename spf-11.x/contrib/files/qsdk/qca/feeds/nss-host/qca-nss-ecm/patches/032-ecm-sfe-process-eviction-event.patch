@@ -1,0 +1,72 @@
+--- a/frontends/sfe/ecm_sfe_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ipv4.c
+@@ -1498,20 +1498,30 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 		 * terminated by the ecm.
+ 		 * NOTE: We take no action here since that is performed by the destroy message ack.
+ 		 */
+-		DEBUG_INFO("%px: ECM initiated final sync seen: %d\n", ci, sync->reason);
++		DEBUG_INFO("%px: ECM initiated SFE_RULE_SYNC_REASON_DESTROY: %d\n", ci, sync->reason);
+ 		break;
+ 	case SFE_RULE_SYNC_REASON_FLUSH:
+-	case SFE_RULE_SYNC_REASON_EVICT:
+ 		/*
+ 		 * SFE has ended acceleration without instruction from the ECM.
+ 		 */
+-		DEBUG_INFO("%px: SFE Initiated final sync seen: %d cause:%d\n", ci, sync->reason, sync->cause);
++		DEBUG_INFO("%px: SFE Initiated SFE_RULE_SYNC_REASON_FLUSH: %d cause:%d\n", ci, sync->reason, sync->cause);
+ 
+ 		/*
+ 		 * SFE Decelerated the connection
+ 		 */
+ 		feci->accel_ceased(feci);
+ 		break;
++	case SFE_RULE_SYNC_REASON_EVICT:
++		/*
++		 * SFE has ended acceleration without instruction from the ECM.
++		 */
++		DEBUG_INFO("%px: SFE Initiated SFE_RULE_SYNC_REASON_EVICT: %d\n", ci, sync->reason);
++
++		/*
++		 * ECM try to regenerate the connection.
++		 */
++		feci->regenerate(feci, ci);
++		break;
+ 	default:
+ 		if (ecm_db_connection_is_routed_get(ci)) {
+ 			/*
+--- a/frontends/sfe/ecm_sfe_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ipv6.c
+@@ -1280,20 +1280,30 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 		 * terminated by the ecm.
+ 		 * NOTE: We take no action here since that is performed by the destroy message ack.
+ 		 */
+-		DEBUG_INFO("%px: ECM initiated final sync seen: %d\n", ci, sync->reason);
++		DEBUG_INFO("%px: ECM initiated SFE_RULE_SYNC_REASON_DESTROY: %d\n", ci, sync->reason);
+ 		break;
+ 	case SFE_RULE_SYNC_REASON_FLUSH:
+-	case SFE_RULE_SYNC_REASON_EVICT:
+ 		/*
+ 		 * SFE has ended acceleration without instruction from the ECM.
+ 		 */
+-		DEBUG_INFO("%px: SFE Initiated final sync seen: %d\n", ci, sync->reason);
++		DEBUG_INFO("%px: SFE Initiated SFE_RULE_SYNC_REASON_FLUSH: %d\n", ci, sync->reason);
+ 
+ 		/*
+ 		 * SFE Decelerated the connection
+ 		 */
+ 		feci->accel_ceased(feci);
+ 		break;
++	case SFE_RULE_SYNC_REASON_EVICT:
++		/*
++		 * SFE has ended acceleration without instruction from the ECM.
++		 */
++		DEBUG_INFO("%px: SFE Initiated SFE_RULE_SYNC_REASON_EVICT: %d\n", ci, sync->reason);
++
++		/*
++		 * ECM try to regenerate the connection.
++		 */
++		feci->regenerate(feci, ci);
++		break;
+ 	default:
+ 		if (ecm_db_connection_is_routed_get(ci)) {
+ 			/*

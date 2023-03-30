@@ -1,0 +1,188 @@
+--- a/frontends/sfe/ecm_sfe_ported_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv4.c
+@@ -366,6 +366,15 @@ static void ecm_sfe_ported_ipv4_connecti
+ 	}
+ 
+ 	/*
++	 * Copy conntrack zone into connection instance
++	 */
++	if (ct) {
++		struct ecm_db_connection_instance *ci = feci->ci;
++		const struct nf_conntrack_zone *zone = nf_ct_zone(ct);
++		memcpy(&ci->ct_zone, zone, sizeof(*zone));
++	}
++
++	/*
+ 	 * Okay construct an accel command.
+ 	 * Initialise creation structure.
+ 	 * NOTE: We leverage the app_data void pointer to be our 32 bit connection serial number.
+--- a/frontends/sfe/ecm_sfe_ported_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ported_ipv6.c
+@@ -371,6 +371,15 @@ static void ecm_sfe_ported_ipv6_connecti
+ 	}
+ 
+ 	/*
++	 * Copy conntrack zone into connection instance
++	 */
++	if (ct) {
++		struct ecm_db_connection_instance *ci = feci->ci;
++		const struct nf_conntrack_zone *zone = nf_ct_zone(ct);
++		memcpy(&ci->ct_zone, zone, sizeof(*zone));
++	}
++
++	/*
+ 	 * Okay construct an accel command.
+ 	 * Initialise creation structure.
+ 	 * NOTE: We leverage the app_data void pointer to be our 32 bit connection serial number.
+--- a/frontends/sfe/ecm_sfe_non_ported_ipv4.c
++++ b/frontends/sfe/ecm_sfe_non_ported_ipv4.c
+@@ -375,7 +375,7 @@ static void ecm_sfe_non_ported_ipv4_conn
+  * can all use and reduce the amount of code!
+  */
+ static void ecm_sfe_non_ported_ipv4_connection_accelerate(struct ecm_front_end_connection_instance *feci, bool is_l2_encap,
+-									struct ecm_classifier_process_response *pr)
++									struct ecm_classifier_process_response *pr, struct nf_conn *ct)
+ {
+ 	struct ecm_sfe_non_ported_ipv4_connection_instance *nnpci = (struct ecm_sfe_non_ported_ipv4_connection_instance *)feci;
+ 	uint16_t regen_occurrances;
+@@ -421,6 +421,15 @@ static void ecm_sfe_non_ported_ipv4_conn
+ 	}
+ 
+ 	/*
++	 * Copy conntrack zone into connection instance
++	 */
++	if (ct) {
++		struct ecm_db_connection_instance *ci = feci->ci;
++		const struct nf_conntrack_zone *zone = nf_ct_zone(ct);
++		memcpy(&ci->ct_zone, zone, sizeof(*zone));
++	}
++
++	/*
+ 	 * Okay construct an accel command.
+ 	 * Initialise creation structure.
+ 	 * NOTE: We leverage the app_data void pointer to be our 32 bit connection serial number.
+@@ -2271,7 +2280,7 @@ done:
+ 		struct ecm_front_end_connection_instance *feci;
+ 		DEBUG_TRACE("%px: accel\n", ci);
+ 		feci = ecm_db_connection_front_end_get_and_ref(ci);
+-		ecm_sfe_non_ported_ipv4_connection_accelerate(feci, is_l2_encap, &prevalent_pr);
++		ecm_sfe_non_ported_ipv4_connection_accelerate(feci, is_l2_encap, &prevalent_pr, ct);
+ 		feci->deref(feci);
+ 	}
+ 	ecm_db_connection_deref(ci);
+--- a/frontends/sfe/ecm_sfe_non_ported_ipv6.c
++++ b/frontends/sfe/ecm_sfe_non_ported_ipv6.c
+@@ -312,7 +312,7 @@ static void ecm_sfe_non_ported_ipv6_conn
+  * can all use and reduce the amount of code!
+  */
+ static void ecm_sfe_non_ported_ipv6_connection_accelerate(struct ecm_front_end_connection_instance *feci,
+-									struct ecm_classifier_process_response *pr, bool is_l2_encap)
++									struct ecm_classifier_process_response *pr, bool is_l2_encap, struct nf_conn *ct)
+ {
+ 	struct ecm_sfe_non_ported_ipv6_connection_instance *nnpci = (struct ecm_sfe_non_ported_ipv6_connection_instance *)feci;
+ 	uint16_t regen_occurrances;
+@@ -357,6 +357,15 @@ static void ecm_sfe_non_ported_ipv6_conn
+ 	}
+ 
+ 	/*
++	 * Copy conntrack zone into connection instance
++	 */
++	if (ct) {
++		struct ecm_db_connection_instance *ci = feci->ci;
++		const struct nf_conntrack_zone *zone = nf_ct_zone(ct);
++		memcpy(&ci->ct_zone, zone, sizeof(*zone));
++	}
++
++	/*
+ 	 * Okay construct an accel command.
+ 	 * Initialise creation structure.
+ 	 * NOTE: We leverage the app_data void pointer to be our 32 bit connection serial number.
+@@ -2070,7 +2079,7 @@ done:
+ 		struct ecm_front_end_connection_instance *feci;
+ 		DEBUG_TRACE("%px: accel\n", ci);
+ 		feci = ecm_db_connection_front_end_get_and_ref(ci);
+-		ecm_sfe_non_ported_ipv6_connection_accelerate(feci, &prevalent_pr, is_l2_encap);
++		ecm_sfe_non_ported_ipv6_connection_accelerate(feci, &prevalent_pr, is_l2_encap, ct);
+ 		feci->deref(feci);
+ 	}
+ 	ecm_db_connection_deref(ci);
+--- a/frontends/sfe/ecm_sfe_ipv4.c
++++ b/frontends/sfe/ecm_sfe_ipv4.c
+@@ -1318,7 +1318,6 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 	 * Keep connection alive and updated
+ 	 */
+ 	if (!ecm_db_connection_defunct_timer_touch(ci)) {
+-		ecm_db_connection_deref(ci);
+ 		goto sync_conntrack;
+ 	}
+ 
+@@ -1483,7 +1482,6 @@ static void ecm_sfe_ipv4_stats_sync_call
+ 	}
+ 
+ 	feci->deref(feci);
+-	ecm_db_connection_deref(ci);
+ 
+ sync_conntrack:
+ 	;
+@@ -1502,9 +1500,11 @@ sync_conntrack:
+ 	tuple.dst.u.all = sync->return_ident;
+ 
+ 	DEBUG_TRACE("Conntrack sync, lookup conntrack connection using\n"
++			"Zone: %u\n"
+ 			"Protocol: %d\n"
+ 			"src_addr: %pI4:%d\n"
+ 			"dest_addr: %pI4:%d\n",
++			ci->ct_zone.id,
+ 			(int)tuple.dst.protonum,
+ 			&tuple.src.u3.ip, (int)(ntohs(tuple.src.u.all)),
+ 			&tuple.dst.u3.ip, (int)(ntohs(tuple.dst.u.all)));
+@@ -1512,7 +1512,8 @@ sync_conntrack:
+ 	/*
+ 	 * Look up conntrack connection
+ 	 */
+-	h = nf_conntrack_find_get(&init_net, &nf_ct_zone_dflt, &tuple);
++	h = nf_conntrack_find_get(&init_net, &ci->ct_zone, &tuple);
++	ecm_db_connection_deref(ci);
+ 	if (!h) {
+ 		DEBUG_WARN("%px: SFE Sync: no conntrack connection\n", sync);
+ 		return;
+--- a/frontends/sfe/ecm_sfe_ipv6.c
++++ b/frontends/sfe/ecm_sfe_ipv6.c
+@@ -1045,7 +1045,6 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 	 * Keep connection alive and updated
+ 	 */
+ 	if (!ecm_db_connection_defunct_timer_touch(ci)) {
+-		ecm_db_connection_deref(ci);
+ 		goto sync_conntrack;
+ 	}
+ 
+@@ -1208,7 +1207,6 @@ static void ecm_sfe_ipv6_stats_sync_call
+ 	}
+ 
+ 	feci->deref(feci);
+-	ecm_db_connection_deref(ci);
+ 
+ sync_conntrack:
+ 	;
+@@ -1227,9 +1225,11 @@ sync_conntrack:
+ 	tuple.dst.u.all = sync->return_ident;
+ 
+ 	DEBUG_TRACE("Conntrack sync, lookup conntrack connection using\n"
++			"Zone: %u\n"
+ 			"Protocol: %d\n"
+ 			"src_addr: " ECM_IP_ADDR_OCTAL_FMT ":%d\n"
+ 			"dest_addr: " ECM_IP_ADDR_OCTAL_FMT ":%d\n",
++			ci->ct_zone.id,
+ 			(int)tuple.dst.protonum,
+ 			ECM_IP_ADDR_TO_OCTAL(flow_ip), (int)ntohs(tuple.src.u.all),
+ 			ECM_IP_ADDR_TO_OCTAL(return_ip), (int)ntohs(tuple.dst.u.all));
+@@ -1237,7 +1237,8 @@ sync_conntrack:
+ 	/*
+ 	 * Look up conntrack connection
+ 	 */
+-	h = nf_conntrack_find_get(&init_net, &nf_ct_zone_dflt, &tuple);
++	h = nf_conntrack_find_get(&init_net, &ci->ct_zone, &tuple);
++	ecm_db_connection_deref(ci);
+ 	if (!h) {
+ 		DEBUG_WARN("%px: SFE Sync: no conntrack connection\n", sync);
+ 		return;

@@ -1,0 +1,30 @@
+--- a/frontends/sfe/ecm_sfe_ipv4.h
++++ b/frontends/sfe/ecm_sfe_ipv4.h
+@@ -73,9 +73,9 @@ static inline bool ecm_sfe_ipv4_accel_pe
+ 	 */
+ 	spin_lock_bh(&feci->lock);
+ 	if (ECM_FRONT_END_ACCELERATION_FAILED(feci->accel_mode)) {
+-		spin_unlock_bh(&feci->lock);
+-		DEBUG_TRACE("%px: accel %px failed\n", feci, feci->ci);
+-		return false;
++		DEBUG_TRACE("%px: accel %px failed: %d, try to recover\n", feci, feci->ci, feci->accel_mode);
++		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
++		feci->is_defunct = false;
+ 	}
+ 
+ 	/*
+--- a/frontends/sfe/ecm_sfe_ipv6.h
++++ b/frontends/sfe/ecm_sfe_ipv6.h
+@@ -73,9 +73,9 @@ static inline bool ecm_sfe_ipv6_accel_pe
+ 	 */
+ 	spin_lock_bh(&feci->lock);
+ 	if (ECM_FRONT_END_ACCELERATION_FAILED(feci->accel_mode)) {
+-		spin_unlock_bh(&feci->lock);
+-		DEBUG_TRACE("%px: accel %px failed\n", feci, feci->ci);
+-		return false;
++		DEBUG_TRACE("%px: accel %px failed: %d, try to recover\n", feci, feci->ci, feci->accel_mode);
++		feci->accel_mode = ECM_FRONT_END_ACCELERATION_MODE_DECEL;
++		feci->is_defunct = false;
+ 	}
+ 
+ 	/*

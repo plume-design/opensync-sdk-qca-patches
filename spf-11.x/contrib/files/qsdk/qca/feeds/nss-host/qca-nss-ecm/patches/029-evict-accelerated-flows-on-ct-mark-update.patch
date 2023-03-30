@@ -1,0 +1,74 @@
+--- a/ecm_conntrack_notifier.c
++++ b/ecm_conntrack_notifier.c
+@@ -128,10 +128,10 @@ static void ecm_conntrack_ipv6_event_des
+  */
+ static void ecm_conntrack_ipv6_event_mark(struct nf_conn *ct)
+ {
+-	struct ecm_db_connection_instance *ci;
++	struct ecm_db_connection_instance *ci = NULL;
+ 	struct ecm_classifier_instance *__attribute__((unused))cls;
+ 
+-	DEBUG_INFO("Mark event for ct: %px\n", ct);
++	DEBUG_INFO("Mark event for ct: %px, mark %d\n", ct, ct->mark);
+ 
+ 	/*
+ 	 * Ignore transitions to zero
+@@ -146,6 +146,13 @@ static void ecm_conntrack_ipv6_event_mar
+ 		return;
+ 	}
+ 
++	if ((ct->mark >= 2) & (ct->mark != ci->mark))
++	{
++		DEBUG_TRACE("%px/%px: ct->mark %d != ci->mark %d\n", ct, ci, ct->mark, ci->mark);
++		ecm_db_connection_mark_set(ci, ct->mark);
++		ecm_db_connection_make_defunct(ci);
++	}
++
+ #ifdef ECM_CLASSIFIER_NL_ENABLE
+ 	/*
+ 	 * As of now, only the Netlink classifier is interested in conmark changes
+@@ -196,7 +203,7 @@ int ecm_conntrack_ipv6_event(unsigned lo
+ 	 * handle mark change events
+ 	 */
+ 	if (events & (1 << IPCT_MARK)) {
+-		DEBUG_TRACE("%px: Event is mark\n", ct);
++		DEBUG_TRACE("%px: Event is mark: %d\n", ct, ct->mark);
+ 		ecm_conntrack_ipv6_event_mark(ct);
+ 	}
+ #endif
+@@ -235,10 +242,10 @@ static void ecm_conntrack_ipv4_event_des
+  */
+ static void ecm_conntrack_ipv4_event_mark(struct nf_conn *ct)
+ {
+-	struct ecm_db_connection_instance *ci;
++	struct ecm_db_connection_instance *ci = NULL;
+ 	struct ecm_classifier_instance *__attribute__((unused))cls;
+ 
+-	DEBUG_INFO("Mark event for ct: %px\n", ct);
++	DEBUG_INFO("Mark event for ct: %px, mark %d\n", ct, ct->mark);
+ 
+ 	/*
+ 	 * Ignore transitions to zero
+@@ -253,6 +260,13 @@ static void ecm_conntrack_ipv4_event_mar
+ 		return;
+ 	}
+ 
++	if ((ct->mark >= 2) & (ct->mark != ci->mark))
++	{
++		DEBUG_TRACE("%px/%px: ct->mark %d != ci->mark %d\n", ct, ci, ct->mark, ci->mark);
++		ecm_db_connection_mark_set(ci, ct->mark);
++		ecm_db_connection_make_defunct(ci);
++	}
++
+ #ifdef ECM_CLASSIFIER_NL_ENABLE
+ 	/*
+ 	 * As of now, only the Netlink classifier is interested in conmark changes
+@@ -304,7 +318,7 @@ int ecm_conntrack_ipv4_event(unsigned lo
+ 	 * handle mark change events
+ 	 */
+ 	if (events & (1 << IPCT_MARK)) {
+-		DEBUG_TRACE("%px: Event is mark\n", ct);
++		DEBUG_TRACE("%px: Event is mark, %d\n", ct, ct->mark);
+ 		ecm_conntrack_ipv4_event_mark(ct);
+ 	}
+ #endif

@@ -1,0 +1,12 @@
+--- a/simulated-driver/sfe_drv.c
++++ b/simulated-driver/sfe_drv.c
+@@ -469,6 +469,9 @@ static void sfe_drv_ipv4_stats_sync_call
+ 	case SFE_SYNC_REASON_DESTROY:
+ 		sync_msg->reason = SFE_RULE_SYNC_REASON_DESTROY;
+ 		break;
++	case SFE_SYNC_REASON_EVICT:
++		sync_msg->reason = SFE_RULE_SYNC_REASON_EVICT;
++		break;
+ 	case SFE_SYNC_REASON_FLUSH:
+ 		sync_msg->reason = SFE_RULE_SYNC_REASON_FLUSH;
+ 		break;
