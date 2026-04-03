@@ -1,0 +1,79 @@
+ECM already provides a kernel module parameter called
+front_end_selection, which allows the userspace to define an
+acceleration frontend precedence when the ECM kernel module is loaded.
+    
+This patch extends this kernel module parameter so it can be updated in
+runtime, allowing us to modify the acceleration engine precedence array
+during runtime. This has an advantage over an external frontend select
+kernel module (which forces a user specified frontend), since using the
+precedence table allows ECM to fallback to a lower priority frontend, in
+case the higher priority one does not support a specific acceleration
+feature.
+--- a/ecm_init.c
++++ b/ecm_init.c
+@@ -57,8 +57,6 @@
+ enum ecm_front_end_type selected_front_end;
+ 
+ int front_end_selection;
+-module_param(front_end_selection, int, 0);
+-MODULE_PARM_DESC(front_end_selection, "Select front end for ECM");
+ 
+ struct dentry *ecm_dentry;	/* Dentry object for top level ecm debugfs directory */
+ 
+@@ -120,6 +118,56 @@ extern int ecm_classifier_wifi_init(stru
+ extern void ecm_classifier_wifi_exit(void);
+ #endif
+ 
++/* Callback function for setting the front_end_selection parameter */
++static int front_end_selection_set(const char *buffer, const struct kernel_param *kp)
++{
++	enum ecm_front_end_type new_selected_front_end;
++	int new_front_end_selection;
++	int err;
++
++	/* Convert string to integer */
++	err = kstrtoint(buffer, 10, &new_front_end_selection);
++	if (err < 0) {
++		return err;
++	}
++
++	/* Update kernel module parameter value */
++	DEBUG_INFO("front_end_selection updated: %d -> %d\n", front_end_selection, new_front_end_selection);
++	*(int *)kp->arg = new_front_end_selection;
++
++	/* Covnert integer value to frontend enum */
++	new_selected_front_end = ecm_front_end_type_select();
++	if (new_selected_front_end == ECM_FRONT_END_TYPE_MAX) {
++		DEBUG_ERROR("Front-end couldn't be selected\n");
++		return -EINVAL;
++	}
++	selected_front_end = new_selected_front_end;
++
++	/* Update precedence array using the new enum value */
++	if (!ecm_front_end_set_ae_precendence_array(selected_front_end)) {
++		DEBUG_ERROR("Acceleration engine precedence array couldn't be set\n");
++		return -EINVAL;
++	}
++
++	return 0;
++}
++
++/* Callback function for getting the front_end_selection parameter */
++static int front_end_selection_get(char *buffer, const struct kernel_param *kp)
++{
++	return sprintf(buffer, "%d\n", front_end_selection);
++}
++
++/* Define front_end_selection parameter operations */
++static const struct kernel_param_ops front_end_selection_ops = {
++	.set = front_end_selection_set,
++	.get = front_end_selection_get,
++};
++
++/* Register front_end_selection parameter with the callback */
++module_param_cb(front_end_selection, &front_end_selection_ops, &front_end_selection, 0644);
++MODULE_PARM_DESC(front_end_selection, "Select front end for ECM");
++
+ /*
+  * ecm_init()
+  */

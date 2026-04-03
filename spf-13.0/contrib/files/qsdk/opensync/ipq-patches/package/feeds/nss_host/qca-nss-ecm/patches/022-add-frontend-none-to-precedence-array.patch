@@ -1,0 +1,42 @@
+This patch adds ability to disable acceleration via ECM kernel module
+parameter.
+
+--- a/frontends/include/ecm_front_end_types.h
++++ b/frontends/include/ecm_front_end_types.h
+@@ -108,6 +108,7 @@ enum ecm_front_end_engine_flag {
+  * ECM_FRONT_END_TYPE_PPE: select PPE front end.
+  * ECM_FRONT_END_TYPE_NSS_SFE: Both NSS and SFE can be selected.
+  * ECM_FRONT_END_TYPE_PPE_SFE: Both PPE and SFE can be selected.
++ * ECM_FRONT_END_TYPE_NONE: No engine can be selected (acceleration disabled).
+  */
+ enum ecm_front_end_type {
+ 	ECM_FRONT_END_TYPE_AUTO,
+@@ -117,6 +118,7 @@ enum ecm_front_end_type {
+ 	ECM_FRONT_END_TYPE_NSS_SFE,
+ 	ECM_FRONT_END_TYPE_PPE_SFE,
+ 	ECM_FRONT_END_TYPE_SFE_PPE,
++	ECM_FRONT_END_TYPE_NONE,
+ 	ECM_FRONT_END_TYPE_MAX
+ };
+ 
+@@ -496,6 +498,10 @@ static inline enum ecm_front_end_type ec
+ 	}
+ #endif
+ 
++	if (front_end_selection == ECM_FRONT_END_TYPE_NONE) {
++		return ECM_FRONT_END_TYPE_NONE;
++	}
++
+ 	return ECM_FRONT_END_TYPE_MAX;
+ }
+ 
+@@ -565,6 +571,9 @@ static inline bool ecm_front_end_set_ae_
+ 		ae_precedence[ECM_AE_PRECEDENCE_MAX].ae_type = ECM_FRONT_END_ENGINE_MAX;
+ 		break;
+ #endif
++	case ECM_FRONT_END_TYPE_NONE:
++		ae_precedence[ECM_AE_PRECEDENCE_0].ae_type = ECM_FRONT_END_ENGINE_MAX;
++		break;
+ 	default:
+ 		DEBUG_TRACE("precedence is not supported for the ECM mode type: %d\n", type);
+ 		return false;

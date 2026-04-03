@@ -1,0 +1,54 @@
+Function ecm_ipv6_is_bridge_pkt() checks if a given packet is bridged
+or not. Among other things it also checks if the interfaces the packet
+traversed have an IPv6 address using ecm_ipv6_is_bridge_pkt(). If it
+finds an IPv6 address, it decides that the packet is NOT bridged.
+While this is correct for public IPv6 addresses, link local addresses
+should not trigger this behavior. This patch fixes this issue.
+
+--- a/frontends/cmn/ecm_ipv6.c
++++ b/frontends/cmn/ecm_ipv6.c
+@@ -122,11 +122,12 @@ bool ecm_ipv6_terminate_pending = false;
+ 
+ /*
+  * ecm_ipv6_dev_has_ipaddr()
+- *	Returns true if dev has an IPv6 address
++ *	Returns true if dev has an IPv6 address with greater scope than link-local
+  */
+ bool ecm_ipv6_dev_has_ipaddr(struct net_device *dev)
+ {
+ 	struct inet6_dev *ip6_inetdev;
++	struct inet6_ifaddr *ip6_ifaddr;
+ 
+ 	ip6_inetdev = __in6_dev_get(dev);
+ 	if (!ip6_inetdev) {
+@@ -140,9 +141,29 @@ bool ecm_ipv6_dev_has_ipaddr(struct net_
+ 		DEBUG_TRACE("%px: dev->ip6_ptr->addr_list is empty for %s\n", dev, dev->name);
+ 		return false;
+ 	}
++
++	/*
++	 * Each device address list is sorted in order of scope -
++	 * global before linklocal.
++	 */
++	list_for_each_entry(ip6_ifaddr, &ip6_inetdev->addr_list, if_list) {
++		DEBUG_TRACE("%px: interface %s has IPv6 address %pI6\n", dev, dev->name, &ip6_ifaddr->addr);
++
++		if (ipv6_addr_src_scope(&ip6_ifaddr->addr) > IPV6_ADDR_SCOPE_LINKLOCAL) {
++			// This address has greater scope than link-local
++			read_unlock_bh(&ip6_inetdev->lock);
++
++			DEBUG_TRACE("%px: interface %s has IPv6 address with > linklocal scope\n", dev, dev->name);
++			return true;
++		} else {
++			// Since the address list is ordered and the greatest scope address is always the first
++			// in the list, we already know no address has greater scope than link-local
++			break;
++		}
++	}
+ 	read_unlock_bh(&ip6_inetdev->lock);
+ 
+-	return true;
++	return false;
+ }
+ 
+ /*

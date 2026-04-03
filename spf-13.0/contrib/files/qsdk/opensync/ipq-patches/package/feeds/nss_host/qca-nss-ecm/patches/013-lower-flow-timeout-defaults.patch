@@ -1,0 +1,25 @@
+This patch reduces the timeout for ECM connections (mainly for TCP and
+UDP connections). In theory there is no downside to reducing the
+timeout, since aggresively removing inactive connections saves memory
+and connections without enough traffic to keep them alive (due to the
+lower timeout) probably don't need to be accelerated anyway.
+--- a/ecm_db/ecm_db_types.h
++++ b/ecm_db/ecm_db_types.h
+@@ -88,12 +88,12 @@ typedef void (*ecm_db_iface_listener_rem
+  * Time out values - in seconds - used to configure timer groups
+  */
+ #define ECM_DB_CLASSIFIER_DETERMINE_GENERIC_TIMEOUT 5
+-#define ECM_DB_CONNECTION_GENERIC_TIMEOUT 240
+-#define ECM_DB_CONNECTION_TCP_RST_TIMEOUT 240
+-#define ECM_DB_CONNECTION_TCP_SHORT_TIMEOUT 240
++#define ECM_DB_CONNECTION_GENERIC_TIMEOUT 75
++#define ECM_DB_CONNECTION_TCP_RST_TIMEOUT 60
++#define ECM_DB_CONNECTION_TCP_SHORT_TIMEOUT 60
+ #define ECM_DB_CONNECTION_TCP_CLOSED_TIMEOUT 10
+-#define ECM_DB_CONNECTION_TCP_LONG_TIMEOUT 3600
+-#define ECM_DB_CONNECTION_UDP_TIMEOUT 300
++#define ECM_DB_CONNECTION_TCP_LONG_TIMEOUT 360
++#define ECM_DB_CONNECTION_UDP_TIMEOUT 60
+ #define ECM_DB_CONNECTION_IGMP_TIMEOUT 240
+ #define ECM_DB_CONNECTION_ICMP_TIMEOUT 60
+ #define ECM_DB_CONNECTION_PPTP_DATA_TIMEOUT 300

@@ -1,0 +1,145 @@
+PPE cannot accelerate packets that were previously accelerated by SFE
+(for example GRE tunneling). This is QCA limitation.
+This patch prevents creation of PPE flows if this flow would connect
+with a SFE GRE acceleration entry. This is not a longterm fix, but does
+improve general performance.
+
+--- a/frontends/ppe/ecm_ppe_common.h
++++ b/frontends/ppe/ecm_ppe_common.h
+@@ -181,3 +181,5 @@ bool ecm_ppe_tunipip6_is_flow_offload_en
+ 			struct ecm_db_iface_instance *ii, bool is_encap);
+ #endif
+ void ecm_ppe_common_update_rule(struct ecm_front_end_connection_instance *feci, enum ecm_rule_update_type type, void *arg);
++
++bool ecm_ppe_accel_allowed_for_iface(struct ecm_db_iface_instance *ii);
+--- a/frontends/ppe/ecm_ppe_common.c
++++ b/frontends/ppe/ecm_ppe_common.c
+@@ -560,3 +560,68 @@ void ecm_ppe_common_update_rule(struct e
+ 		break;
+ 	}
+ }
++
++bool ecm_ppe_accel_allowed_for_iface(struct ecm_db_iface_instance *ii) {
++	struct ecm_db_connection_instance *ci;
++	struct net_device *dev;
++	struct ip_tunnel *tunnel;
++	struct ip_tunnel_parm *parms;
++	ip_addr_t ecm_src_ip;
++	ip_addr_t ecm_dst_ip;
++	bool accel_allowed = true;
++
++	/*
++	 * Find net_device from ecm_db_iface_instance
++	 */
++	dev = dev_get_by_index(&init_net, ecm_db_iface_interface_identifier_get(ii));
++	if (!dev) {
++		return true;
++	}
++
++	/*
++	 * We only care about GRETAP interfaces, which can only have IPv4 addresses,
++	 * so no need to worry about IPv6
++	 */
++	if (netif_is_gretap(dev) == false) {
++		goto finished;
++	}
++
++	/* Parse local and remote IP address from GRETAP */
++	tunnel = netdev_priv(dev);
++	parms = &tunnel->parms;
++	DEBUG_TRACE("interface %s is a GRETAP interface, local IPv4: %pI4, remote IPv4: %pI4\n", dev->name, &parms->iph.saddr, &parms->iph.daddr);
++	ECM_NIN4_ADDR_TO_IP_ADDR(ecm_src_ip, parms->iph.saddr);
++	ECM_NIN4_ADDR_TO_IP_ADDR(ecm_dst_ip, parms->iph.daddr);
++
++	/*
++	 * Lookup GRE acceleration entry using obtained local and remote IP address,
++	 * both ports are 0 in case of GRETAP tunnel connection
++	 */
++	ci = ecm_db_connection_find_and_ref(ecm_src_ip, ecm_dst_ip, IPPROTO_GRE, 0, 0);
++	if (!ci) {
++		/* Try reverse */
++		ci = ecm_db_connection_find_and_ref(ecm_dst_ip, ecm_src_ip, IPPROTO_GRE, 0, 0);
++	}
++
++	if (ci) {
++		struct ecm_front_end_connection_instance *feci = ecm_db_connection_front_end_get_and_ref(ci);
++
++		/*
++		 * If the looked up non-ported connection entry is accelerated by SFE,
++		 * we need to deny PPE acceleration
++		 */
++		if (feci->accel_engine == ECM_FRONT_END_ENGINE_SFE) {
++			DEBUG_TRACE("%px: non-ported connection accel engine is SFE, denying PPE acceleration\n", ci);
++			accel_allowed = false;
++		}
++
++		ecm_front_end_connection_deref(feci);
++		ecm_db_connection_deref(ci);
++	}
++
++finished:
++	/* Cleanup */
++	dev_put(dev);
++
++	return accel_allowed;
++}
+--- a/frontends/ppe/ecm_ppe_ported_ipv4.c
++++ b/frontends/ppe/ecm_ppe_ported_ipv4.c
+@@ -702,6 +702,13 @@ process_next_iface_flow:
+ 		}
+ 
+ 		/*
++		 * Check if PPE acceleration is allowed for this interface
++		 */
++		if (ecm_ppe_accel_allowed_for_iface(ii) == false) {
++			rule_invalid = true;
++		}
++
++		/*
+ 		 * Seen an interface of this type
+ 		 */
+ 		interface_type_counts[ii_type]++;
+@@ -1111,6 +1118,13 @@ process_next_iface_return:
+ 		}
+ 
+ 		/*
++		 * Check if PPE acceleration is allowed for this interface
++		 */
++		if (ecm_ppe_accel_allowed_for_iface(ii) == false) {
++			rule_invalid = true;
++		}
++
++		/*
+ 		 * Seen an interface of this type
+ 		 */
+ 		interface_type_counts[ii_type]++;
+--- a/frontends/ppe/ecm_ppe_ported_ipv6.c
++++ b/frontends/ppe/ecm_ppe_ported_ipv6.c
+@@ -690,6 +690,13 @@ process_next_iface_flow:
+ 		}
+ 
+ 		/*
++		 * Check if PPE acceleration is allowed for this interface
++		 */
++		if (ecm_ppe_accel_allowed_for_iface(ii) == false) {
++			rule_invalid = true;
++		}
++
++		/*
+ 		 * Seen an interface of this type
+ 		 */
+ 		interface_type_counts[ii_type]++;
+@@ -1083,6 +1090,13 @@ process_next_iface_return:
+ 		}
+ 
+ 		/*
++		 * Check if PPE acceleration is allowed for this interface
++		 */
++		if (ecm_ppe_accel_allowed_for_iface(ii) == false) {
++			rule_invalid = true;
++		}
++
++		/*
+ 		 * Seen an interface of this type
+ 		 */
+ 		interface_type_counts[ii_type]++;
